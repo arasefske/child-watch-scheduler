@@ -79,6 +79,14 @@ if "pending_chat_changes" not in st.session_state:
 if "new_hire_candidates" not in st.session_state:
     st.session_state["new_hire_candidates"] = None
 
+# Employee List Change Detection State Initialization
+if "employee_data_hash" not in st.session_state:
+    st.session_state["employee_data_hash"] = None
+if "employee_last_synced" not in st.session_state:
+    st.session_state["employee_last_synced"] = None
+if "employee_external_change" not in st.session_state:
+    st.session_state["employee_external_change"] = False
+
 active_key = f"{selected_year}-{selected_month}"
 fallback_cols = ["Date", "Day of Week", "Day Type", "Start Time", "End Time", "Assigned Employee", "Issues"]
 
@@ -123,6 +131,9 @@ if force_refresh_clicked:
     st.session_state["schedule_df"] = None
     st.session_state["last_error"] = None
     st.session_state["history_df"] = None
+    st.session_state["employee_data_hash"] = None
+    st.session_state["employee_last_synced"] = None
+    st.session_state["employee_external_change"] = False
     st.cache_data.clear()
     st.rerun()
 
@@ -595,6 +606,18 @@ def render_schedule_summary(data_frame):
         col_gaps.metric("Gaps / Issues", gap_shifts)
 
 # 6. Render Views
+# --- Pre-compute tab badge labels (only meaningful when schedule data is loaded) ---
+audit_tab_label = "👤 Employee Validation Audit"
+history_tab_label = "📜 History"
+employees_df = pd.DataFrame()
+active_employees = pd.DataFrame()
+employee_conflicts = {}
+total_conflict_count = 0
+rules_map = {}
+history_df_preview = pd.DataFrame()
+unseen_direct_edits = 0
+latest_direct_edit_ts = ""
+
 if working_df is not None and not working_df.empty:
     # Pre-compute validation conflicts once so the tab label itself can show a rollup count,
     # without requiring the audit tab to be opened first. This runs on every rerun of the
@@ -603,14 +626,11 @@ if working_df is not None and not working_df.empty:
     # wait is visible instead of making unrelated buttons look hung.
     employees_df, _, _ = cached_load_tab_data()
     active_employees = employees_df[employees_df['Status'].str.lower() == 'active']
-    employee_conflicts = {}
-    total_conflict_count = 0
     if not active_employees.empty:
         with st.spinner("Validating employee schedules against availability rules..."):
             rules_map = cached_normalize_rules(selected_year, selected_month, active_employees)
             employee_conflicts, total_conflict_count = compute_employee_conflicts(working_df, active_employees, rules_map)
 
-    audit_tab_label = "👤 Employee Validation Audit"
     if total_conflict_count > 0:
         audit_tab_label += f" 🚨 {total_conflict_count}"
         # Tab labels in Streamlit can't be styled, so surface a prominent banner above the
@@ -636,7 +656,6 @@ if working_df is not None and not working_df.empty:
     last_seen_direct_edit_ts = scheduler.get_app_state("last_seen_direct_edit_timestamp", "")
     unseen_direct_edits, latest_direct_edit_ts = scheduler.count_unseen_direct_edits(history_df_preview, last_seen_direct_edit_ts)
 
-    history_tab_label = "📜 History"
     if unseen_direct_edits > 0:
         history_tab_label += f" 🔔 {unseen_direct_edits}"
         st.markdown(f"""
@@ -650,9 +669,13 @@ if working_df is not None and not working_df.empty:
             </div>
         """, unsafe_allow_html=True)
 
-    tab1, tab2, tab3, tab4 = st.tabs(["📊 Table Editor View", "📅 Calendar Grid View", audit_tab_label, history_tab_label])
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    "📊 Table Editor View", "📅 Calendar Grid View",
+    audit_tab_label, history_tab_label, "👥 Employee List"
+])
 
-    with tab1:
+with tab1:
+    if working_df is not None and not working_df.empty:
         render_schedule_summary(working_df)
         st.write("Double-click **Assigned Employee** cells below to manually override names.")
         show_gaps_only_table = st.toggle("🔍 Show only gaps", key="table_gaps_toggle")
@@ -708,30 +731,33 @@ if working_df is not None and not working_df.empty:
                     del st.session_state[table_editor_key]
                     st.rerun()
         render_inline_undo("Table Editor Inline Save")
+    else:
+        st.info("No shifts found for this month. Use Step 1 above to initialize first.")
 
-    with tab2:
+with tab2:
+    if working_df is not None and not working_df.empty:
         render_schedule_summary(working_df)
         st.write("Overview of all daily assignments and gaps at a glance.")
         show_gaps_only_calendar = st.toggle("🔍 Show only gaps", key="calendar_gaps_toggle")
         calendar_source_df = filter_gaps_only(working_df) if show_gaps_only_calendar else working_df
         calendar_html = render_html_calendar_grid(selected_year, selected_month, calendar_source_df)
         st.markdown(calendar_html, unsafe_allow_html=True)
-        
+
         st.write("")
         st.subheader("✏️ Quick Day Editor")
         st.write("Select a specific calendar day to modify its internal shifts directly.")
-        
+
         min_date = datetime(selected_year, selected_month, 1)
         if selected_month == 12:
             max_date = datetime(selected_year, selected_month, 31)
         else:
             max_date = datetime(selected_year, selected_month + 1, 1) - timedelta(days=1)
-            
+
         edit_date = st.date_input("Choose date to edit:", value=min_date, min_value=min_date, max_value=max_date)
         edit_date_str = edit_date.strftime("%Y-%m-%d")
-        
+
         day_shifts = working_df[working_df['Date'] == edit_date_str].copy()
-        
+
         if not day_shifts.empty:
             edited_day_df = st.data_editor(
                 day_shifts,
@@ -740,7 +766,7 @@ if working_df is not None and not working_df.empty:
                 disabled=["Date", "Day of Week", "Day Type", "Start Time", "End Time", "Issues"],
                 key=f"day_editor_{edit_date_str}"
             )
-            
+
             if not edited_day_df.equals(day_shifts):
                 if st.button("💾 Save Day Overrides to Google Sheet", type="primary", use_container_width=True):
                     capture_undo_snapshot(f"Day Shift Overrides for {edit_date_str}")
@@ -748,27 +774,30 @@ if working_df is not None and not working_df.empty:
                         try:
                             main_df = working_df.fillna("").copy()
                             main_df['Date'] = main_df['Date'].astype(str)
-                            
+
                             cleaned_day_df = edited_day_df.fillna("").copy()
                             cleaned_day_df['Date'] = cleaned_day_df['Date'].astype(str)
                             cleaned_day_df['Assigned Employee'] = cleaned_day_df['Assigned Employee'].astype(str).str.strip()
-                            
+
                             cleaned_day_df.loc[cleaned_day_df['Assigned Employee'] != "", 'Issues'] = ""
                             cleaned_day_df.loc[cleaned_day_df['Assigned Employee'] == "", 'Issues'] = "GAP"
-                            
+
                             main_df.loc[main_df['Date'] == edit_date_str] = cleaned_day_df
                             rows_to_write = main_df[fallback_cols].values.tolist()
                             scheduler.write_to_spreadsheet(selected_year, selected_month, rows_to_write, method="Manual Override (Day Editor)")
                             st.success(f"Successfully saved overrides for {edit_date_str}!")
-                            st.session_state["schedule_df"] = None  
+                            st.session_state["schedule_df"] = None
                             st.rerun()
                         except Exception as e:
                             st.error(f"Failed to commit day shifts: {e}")
             render_inline_undo(f"Day Shift Overrides for {edit_date_str}")
         else:
             st.info("No structural shifts exist for the chosen day template layout.")
+    else:
+        st.info("No shifts found for this month. Use Step 1 above to initialize first.")
 
-    with tab3:
+with tab3:
+    if working_df is not None and not working_df.empty:
         st.write("Cross-reference scheduled workloads against default preference constraints and rule parameters.")
         try:
             if not active_employees.empty:
@@ -880,8 +909,11 @@ if working_df is not None and not working_df.empty:
                 st.warning("No active employees configured inside the roster system.")
         except Exception as e:
             st.error(f"Failed to compile audit summary profile matrix: {e}")
+    else:
+        st.info("No shifts found for this month. Use Step 1 above to initialize first.")
 
-    with tab4:
+with tab4:
+    if working_df is not None and not working_df.empty:
         st.write("Every change made to the Assignments sheet — through this app or directly in Google Sheets.")
         try:
             history_df = history_df_preview
@@ -948,9 +980,106 @@ if working_df is not None and not working_df.empty:
                         st.rerun()
         except Exception as e:
             st.error(f"Failed to load change history: {e}")
+    else:
+        st.info("No history recorded yet for this month.")
 
-elif working_df is not None and working_df.empty:
-    st.info("No shifts found for this month selection. Run initialization first.")
+with tab5:
+    st.write("Add, edit, or deactivate employees. Changes save directly to the Employees tab of the Google Sheet.")
+    st.caption("Double-click any cell to edit. Use the ➕ button at the bottom to add a new employee. Click the checkbox on a row then the delete icon to remove one.")
+
+    emp_df_for_list, _, _ = cached_load_tab_data()
+    employee_list_cols = ['Employee Name', 'Status', 'Default Rules', 'Blocked Dates', 'Min Hours', 'Max Hours', 'Start Date']
+    display_df = emp_df_for_list[employee_list_cols].copy()
+    # Normalize Status to lowercase so it matches the SelectboxColumn options regardless of
+    # how it was capitalized in the Google Sheet (e.g. "Active" → "active").
+    display_df['Status'] = display_df['Status'].str.lower().str.strip()
+
+    # --- External change detection ---
+    # Hash the current data from the sheet. If it differs from the last hash we stored in
+    # session state, the sheet was edited outside the app (direct edit or another browser
+    # session) since we last loaded it.
+    current_emp_hash = hash(display_df.to_csv(index=False))
+    if st.session_state["employee_data_hash"] is None:
+        # First load after session start, save, or force-refresh — initialize quietly.
+        st.session_state["employee_data_hash"] = current_emp_hash
+        st.session_state["employee_last_synced"] = datetime.now()
+    elif current_emp_hash != st.session_state["employee_data_hash"]:
+        # Cache was refreshed and data differs — flag an external change.
+        st.session_state["employee_data_hash"] = current_emp_hash
+        st.session_state["employee_last_synced"] = datetime.now()
+        st.session_state["employee_external_change"] = True
+
+    if st.session_state["employee_external_change"]:
+        banner_col, dismiss_col = st.columns([5, 1])
+        with banner_col:
+            st.warning("⚠️ The employee list in Google Sheets was changed outside this app. The table below already reflects the latest data — review it before making further edits.")
+        with dismiss_col:
+            st.write("")
+            if st.button("Dismiss", key="dismiss_emp_change"):
+                st.session_state["employee_external_change"] = False
+                st.rerun()
+
+    # Last-synced timestamp + targeted refresh button
+    sync_ts_col, refresh_btn_col = st.columns([5, 1])
+    with sync_ts_col:
+        if st.session_state["employee_last_synced"]:
+            elapsed_secs = int((datetime.now() - st.session_state["employee_last_synced"]).total_seconds())
+            if elapsed_secs < 60:
+                sync_label = "just now"
+            elif elapsed_secs < 3600:
+                mins = elapsed_secs // 60
+                sync_label = f"{mins} minute{'s' if mins != 1 else ''} ago"
+            else:
+                hrs = elapsed_secs // 3600
+                sync_label = f"{hrs} hour{'s' if hrs != 1 else ''} ago"
+            st.caption(f"Last synced from Google Sheets: {sync_label}")
+    with refresh_btn_col:
+        if st.button("🔄 Refresh", use_container_width=True, key="refresh_employee_list_btn"):
+            st.cache_data.clear()
+            st.session_state["employee_data_hash"] = None
+            st.session_state["employee_last_synced"] = None
+            st.session_state["employee_external_change"] = False
+            st.rerun()
+
+    employee_list_key = "employee_list_editor"
+    edited_employees = st.data_editor(
+        display_df,
+        use_container_width=True,
+        hide_index=True,
+        num_rows="dynamic",
+        column_config={
+            "Employee Name": st.column_config.TextColumn("Employee Name", required=True),
+            "Status": st.column_config.SelectboxColumn("Status", options=["active", "inactive"], required=True),
+            "Default Rules": st.column_config.TextColumn("Default Rules", help="e.g. 'Mon/Wed/Fri mornings only'"),
+            "Blocked Dates": st.column_config.TextColumn("Blocked Dates", help="e.g. '2026-07-04, 2026-07-15'"),
+            "Min Hours": st.column_config.NumberColumn("Min Hours", min_value=0.0, step=0.5, format="%.1f"),
+            "Max Hours": st.column_config.NumberColumn("Max Hours", min_value=0.0, step=0.5, format="%.1f"),
+            "Start Date": st.column_config.TextColumn("Start Date", help="e.g. '2026-07-01' — leave blank if already eligible"),
+        },
+        key=employee_list_key,
+    )
+
+    if not edited_employees.equals(display_df):
+        save_emp_col, revert_emp_col = st.columns(2)
+        if save_emp_col.button("💾 Save Employee Changes to Google Sheet", type="primary", use_container_width=True, key="save_employees_btn"):
+            with st.spinner("Saving employee list to Google Sheets..."):
+                try:
+                    clean_save_df = edited_employees.dropna(subset=["Employee Name"]).copy()
+                    clean_save_df = clean_save_df[clean_save_df["Employee Name"].astype(str).str.strip() != ""]
+                    scheduler.write_employees_to_sheet(clean_save_df)
+                    st.cache_data.clear()
+                    # Reset hash so the next render initializes fresh without a false-positive
+                    # external-change notification triggered by the data we just wrote.
+                    st.session_state["employee_data_hash"] = None
+                    st.session_state["employee_last_synced"] = None
+                    st.session_state["employee_external_change"] = False
+                    st.success("Employee list saved successfully!")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Failed to save employee list: {e}")
+        if revert_emp_col.button("↩️ Revert Changes", type="secondary", use_container_width=True, key="revert_employees_btn"):
+            del st.session_state[employee_list_key]
+            st.rerun()
 
 st.divider()
 st.caption("Running locally. Data syncs directly with the live 'Child Watch Schedule' Google Sheet.")

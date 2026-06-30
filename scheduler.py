@@ -585,6 +585,16 @@ def load_tab_data():
     holiday_cols = ['Date', 'Day of Week', 'Day Type', 'Name', 'Override Type']
     return fetch_clean_dataframe("Employees", employee_cols), fetch_clean_dataframe("Shift Templates", template_cols), fetch_clean_dataframe("Holidays", holiday_cols)
 
+def write_employees_to_sheet(employees_df):
+    """Overwrites the Employees sheet with the provided dataframe. Clears existing content first."""
+    employee_cols = ['Employee Name', 'Status', 'Default Rules', 'Blocked Dates', 'Min Hours', 'Max Hours', 'Start Date']
+    sheet = workbook.worksheet("Employees")
+    sheet.clear()
+    rows = [employee_cols]
+    for _, row in employees_df.iterrows():
+        rows.append([str(row.get(col, "")).strip() if str(row.get(col, "")) not in ("nan", "None") else "" for col in employee_cols])
+    sheet.update(range_name='A1', values=rows, value_input_option="USER_ENTERED")
+
 def run_initialize_blanks(target_year, target_month):
     print(f"Initializing blank matrix for {target_year}-{target_month:02d}...")
     _, templates_df, holidays_df = load_tab_data()
