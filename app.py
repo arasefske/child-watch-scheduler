@@ -671,7 +671,7 @@ if working_df is not None and not working_df.empty:
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "📊 Table Editor View", "📅 Calendar Grid View",
-    audit_tab_label, history_tab_label, "👥 Employee List"
+    audit_tab_label, "👥 Employee List", history_tab_label
 ])
 
 with tab1:
@@ -913,77 +913,6 @@ with tab3:
         st.info("No shifts found for this month. Use Step 1 above to initialize first.")
 
 with tab4:
-    if working_df is not None and not working_df.empty:
-        st.write("Every change made to the Assignments sheet — through this app or directly in Google Sheets.")
-        try:
-            history_df = history_df_preview
-            if unseen_direct_edits > 0:
-                if st.button(f"🔔 Mark {unseen_direct_edits} direct edit notification(s) as read", type="secondary"):
-                    scheduler.set_app_state("last_seen_direct_edit_timestamp", latest_direct_edit_ts)
-                    st.rerun()
-            if history_df.empty:
-                st.info("No history recorded yet. Changes will start appearing here once you run an action that edits the schedule.")
-            else:
-                filter_col1, filter_col2 = st.columns(2)
-                with filter_col1:
-                    method_options = sorted(history_df["Method"].unique())
-                    # Empty selection = no filter applied = show everything. Selecting one or
-                    # more methods narrows the view to just those — a standard "select to
-                    # include" filter, not an allowlist you have to populate to see anything.
-                    selected_methods = st.multiselect("Filter by method", method_options, default=[])
-                with filter_col2:
-                    employee_search = st.text_input("Filter by employee name", placeholder="e.g. Alice")
-
-                filtered_df = history_df[history_df["Method"].isin(selected_methods)] if selected_methods else history_df
-                if employee_search.strip():
-                    needle = employee_search.strip().lower()
-                    name_match = (
-                        filtered_df["Old Employee"].str.lower().str.contains(needle, na=False)
-                        | filtered_df["New Employee"].str.lower().str.contains(needle, na=False)
-                    )
-                    filtered_df = filtered_df[name_match]
-
-                st.caption(f"Showing {len(filtered_df)} of {len(history_df)} total change(s).")
-
-                # Tint the "what happened" columns (Timestamp, Method) a different shade than
-                # the "what changed" columns, so the two kinds of metadata read as distinct
-                # groups at a glance instead of one undifferentiated row of columns.
-                event_cols = ["Timestamp", "Method"]
-                def shade_event_columns(col):
-                    return ["background-color: #eef2f7" if col.name in event_cols else "" for _ in col]
-
-                st.caption("Select row(s) below to delete them from the history log.")
-                # Key the widget on the filter state so changing a filter swaps in a fresh
-                # widget instance instead of reusing one with a stale selection — Streamlit
-                # tracks dataframe selection by row *position*, so if a filter change reshuffles
-                # what's at each position while a selection is active, the old positions would
-                # silently point at different rows, risking deleting the wrong entry.
-                filter_signature = f"{'|'.join(sorted(selected_methods))}::{employee_search.strip().lower()}"
-                selection_event = st.dataframe(
-                    filtered_df.drop(columns="_sheet_row").style.apply(shade_event_columns, axis=0),
-                    use_container_width=True,
-                    hide_index=True,
-                    on_select="rerun",
-                    selection_mode="multi-row",
-                    key=f"history_table_{hash(filter_signature)}",
-                    # Force literal text rendering — otherwise Streamlit can auto-detect the
-                    # Timestamp column as datetime-like and re-format it with its own display
-                    # logic, silently overriding the 12-hour "...AM/PM" string we stored.
-                    column_config={"Timestamp": st.column_config.TextColumn("Timestamp")}
-                )
-
-                selected_positions = selection_event.selection.rows
-                if selected_positions:
-                    sheet_rows_to_delete = filtered_df.iloc[selected_positions]["_sheet_row"].tolist()
-                    if st.button(f"🗑️ Delete {len(selected_positions)} selected entr{'y' if len(selected_positions) == 1 else 'ies'}", type="secondary"):
-                        scheduler.delete_history_rows(sheet_rows_to_delete)
-                        st.rerun()
-        except Exception as e:
-            st.error(f"Failed to load change history: {e}")
-    else:
-        st.info("No history recorded yet for this month.")
-
-with tab5:
     st.write("Add, edit, or deactivate employees. Changes save directly to the Employees tab of the Google Sheet.")
     st.caption("Double-click any cell to edit. Use the ➕ button at the bottom to add a new employee. Click the checkbox on a row then the delete icon to remove one.")
 
@@ -1080,6 +1009,77 @@ with tab5:
         if revert_emp_col.button("↩️ Revert Changes", type="secondary", use_container_width=True, key="revert_employees_btn"):
             del st.session_state[employee_list_key]
             st.rerun()
+
+with tab5:
+    if working_df is not None and not working_df.empty:
+        st.write("Every change made to the Assignments sheet — through this app or directly in Google Sheets.")
+        try:
+            history_df = history_df_preview
+            if unseen_direct_edits > 0:
+                if st.button(f"🔔 Mark {unseen_direct_edits} direct edit notification(s) as read", type="secondary"):
+                    scheduler.set_app_state("last_seen_direct_edit_timestamp", latest_direct_edit_ts)
+                    st.rerun()
+            if history_df.empty:
+                st.info("No history recorded yet. Changes will start appearing here once you run an action that edits the schedule.")
+            else:
+                filter_col1, filter_col2 = st.columns(2)
+                with filter_col1:
+                    method_options = sorted(history_df["Method"].unique())
+                    # Empty selection = no filter applied = show everything. Selecting one or
+                    # more methods narrows the view to just those — a standard "select to
+                    # include" filter, not an allowlist you have to populate to see anything.
+                    selected_methods = st.multiselect("Filter by method", method_options, default=[])
+                with filter_col2:
+                    employee_search = st.text_input("Filter by employee name", placeholder="e.g. Alice")
+
+                filtered_df = history_df[history_df["Method"].isin(selected_methods)] if selected_methods else history_df
+                if employee_search.strip():
+                    needle = employee_search.strip().lower()
+                    name_match = (
+                        filtered_df["Old Employee"].str.lower().str.contains(needle, na=False)
+                        | filtered_df["New Employee"].str.lower().str.contains(needle, na=False)
+                    )
+                    filtered_df = filtered_df[name_match]
+
+                st.caption(f"Showing {len(filtered_df)} of {len(history_df)} total change(s).")
+
+                # Tint the "what happened" columns (Timestamp, Method) a different shade than
+                # the "what changed" columns, so the two kinds of metadata read as distinct
+                # groups at a glance instead of one undifferentiated row of columns.
+                event_cols = ["Timestamp", "Method"]
+                def shade_event_columns(col):
+                    return ["background-color: #eef2f7" if col.name in event_cols else "" for _ in col]
+
+                st.caption("Select row(s) below to delete them from the history log.")
+                # Key the widget on the filter state so changing a filter swaps in a fresh
+                # widget instance instead of reusing one with a stale selection — Streamlit
+                # tracks dataframe selection by row *position*, so if a filter change reshuffles
+                # what's at each position while a selection is active, the old positions would
+                # silently point at different rows, risking deleting the wrong entry.
+                filter_signature = f"{'|'.join(sorted(selected_methods))}::{employee_search.strip().lower()}"
+                selection_event = st.dataframe(
+                    filtered_df.drop(columns="_sheet_row").style.apply(shade_event_columns, axis=0),
+                    use_container_width=True,
+                    hide_index=True,
+                    on_select="rerun",
+                    selection_mode="multi-row",
+                    key=f"history_table_{hash(filter_signature)}",
+                    # Force literal text rendering — otherwise Streamlit can auto-detect the
+                    # Timestamp column as datetime-like and re-format it with its own display
+                    # logic, silently overriding the 12-hour "...AM/PM" string we stored.
+                    column_config={"Timestamp": st.column_config.TextColumn("Timestamp")}
+                )
+
+                selected_positions = selection_event.selection.rows
+                if selected_positions:
+                    sheet_rows_to_delete = filtered_df.iloc[selected_positions]["_sheet_row"].tolist()
+                    if st.button(f"🗑️ Delete {len(selected_positions)} selected entr{'y' if len(selected_positions) == 1 else 'ies'}", type="secondary"):
+                        scheduler.delete_history_rows(sheet_rows_to_delete)
+                        st.rerun()
+        except Exception as e:
+            st.error(f"Failed to load change history: {e}")
+    else:
+        st.info("No history recorded yet for this month.")
 
 st.divider()
 st.caption("Running locally. Data syncs directly with the live 'Child Watch Schedule' Google Sheet.")
