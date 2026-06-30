@@ -1,7 +1,7 @@
 import streamlit as st
 import scheduler
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 import calendar
 import sys
 import io
@@ -669,6 +669,15 @@ if working_df is not None and not working_df.empty:
             </div>
         """, unsafe_allow_html=True)
 
+# All employee names (active + inactive) used to constrain the Assigned Employee
+# dropdowns in the table and day editors. Includes inactive so existing assignments
+# to recently-deactivated employees still display correctly.
+emp_names_for_dropdown = (
+    [""] + sorted(employees_df['Employee Name'].tolist())
+    if working_df is not None and not working_df.empty and not employees_df.empty
+    else [""]
+)
+
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "📊 Table Editor View", "📅 Calendar Grid View",
     audit_tab_label, "👥 Employee List", history_tab_label
@@ -696,6 +705,14 @@ with tab1:
             use_container_width=True,
             hide_index=True,
             disabled=["Date", "Day of Week", "Day Type", "Start Time", "End Time", "Issues"],
+            column_config={
+                "Assigned Employee": st.column_config.SelectboxColumn(
+                    "Assigned Employee",
+                    options=emp_names_for_dropdown,
+                    required=False,
+                    help="Only employees from the Employee List tab are valid.",
+                )
+            },
             key=table_editor_key
         )
 
@@ -764,6 +781,14 @@ with tab2:
                 use_container_width=True,
                 hide_index=True,
                 disabled=["Date", "Day of Week", "Day Type", "Start Time", "End Time", "Issues"],
+                column_config={
+                    "Assigned Employee": st.column_config.SelectboxColumn(
+                        "Assigned Employee",
+                        options=emp_names_for_dropdown,
+                        required=False,
+                        help="Only employees from the Employee List tab are valid.",
+                    )
+                },
                 key=f"day_editor_{edit_date_str}"
             )
 
@@ -922,6 +947,19 @@ with tab4:
     # Normalize Status to lowercase so it matches the SelectboxColumn options regardless of
     # how it was capitalized in the Google Sheet (e.g. "Active" → "active").
     display_df['Status'] = display_df['Status'].str.lower().str.strip()
+    # Parse Start Date strings into Python date objects so DateColumn renders a date picker.
+    # Empty / unparseable values become None (shown as blank in the picker).
+    def _parse_start_date(s):
+        if not s or str(s).strip() in ("", "nan", "None"):
+            return None
+        try:
+            return datetime.strptime(str(s).strip(), "%Y-%m-%d").date()
+        except ValueError:
+            return None
+    display_df['Start Date'] = display_df['Start Date'].apply(_parse_start_date)
+    # Convert Min/Max Hours to float so the NumberColumn renders correctly.
+    for _col in ('Min Hours', 'Max Hours'):
+        display_df[_col] = pd.to_numeric(display_df[_col], errors='coerce')
 
     # --- External change detection ---
     # Hash the current data from the sheet. If it differs from the last hash we stored in
@@ -983,18 +1021,54 @@ with tab4:
             "Blocked Dates": st.column_config.TextColumn("Blocked Dates", help="e.g. '2026-07-04, 2026-07-15'"),
             "Min Hours": st.column_config.NumberColumn("Min Hours", min_value=0.0, step=0.5, format="%.1f"),
             "Max Hours": st.column_config.NumberColumn("Max Hours", min_value=0.0, step=0.5, format="%.1f"),
-            "Start Date": st.column_config.TextColumn("Start Date", help="e.g. '2026-07-01' — leave blank if already eligible"),
+            "Start Date": st.column_config.DateColumn("Start Date", format="YYYY-MM-DD", help="Leave blank if already eligible. Must be a valid date."),
         },
         key=employee_list_key,
     )
 
     if not edited_employees.equals(display_df):
+        # --- Server-side validation before save ---
+        save_errors = []
+        seen_names = set()
+        for idx, row in edited_employees.iterrows():
+            name = str(row.get('Employee Name') or "").strip()
+            if not name:
+                save_errors.append(f"Row {idx + 1}: Employee Name cannot be blank.")
+                continue
+            if name.lower() in seen_names:
+                save_errors.append(f"Duplicate employee name: **{name}** — each employee must be unique.")
+            seen_names.add(name.lower())
+            min_h = row.get('Min Hours')
+            max_h = row.get('Max Hours')
+            try:
+                if pd.notna(min_h) and pd.notna(max_h):
+                    if float(max_h) < float(min_h):
+                        save_errors.append(f"**{name}**: Max Hours ({max_h:.1f}) cannot be less than Min Hours ({min_h:.1f}).")
+            except (TypeError, ValueError):
+                pass
+
+        if save_errors:
+            for err in save_errors:
+                st.error(err)
+
         save_emp_col, revert_emp_col = st.columns(2)
-        if save_emp_col.button("💾 Save Employee Changes to Google Sheet", type="primary", use_container_width=True, key="save_employees_btn"):
+        if save_emp_col.button("💾 Save Employee Changes to Google Sheet", type="primary", use_container_width=True, key="save_employees_btn", disabled=bool(save_errors)):
             with st.spinner("Saving employee list to Google Sheets..."):
                 try:
                     clean_save_df = edited_employees.dropna(subset=["Employee Name"]).copy()
                     clean_save_df = clean_save_df[clean_save_df["Employee Name"].astype(str).str.strip() != ""]
+                    # Convert date objects back to "YYYY-MM-DD" strings for Google Sheets.
+                    def _fmt_date(d):
+                        try:
+                            return d.strftime("%Y-%m-%d") if isinstance(d, date) else ""
+                        except AttributeError:
+                            return ""
+                    clean_save_df['Start Date'] = clean_save_df['Start Date'].apply(_fmt_date)
+                    # Ensure numeric columns are stored as plain strings (no .0 suffix on integers).
+                    for _col in ('Min Hours', 'Max Hours'):
+                        clean_save_df[_col] = clean_save_df[_col].apply(
+                            lambda v: "" if pd.isna(v) else (str(int(v)) if v == int(v) else str(v))
+                        )
                     scheduler.write_employees_to_sheet(clean_save_df)
                     st.cache_data.clear()
                     # Reset hash so the next render initializes fresh without a false-positive
@@ -1002,13 +1076,24 @@ with tab4:
                     st.session_state["employee_data_hash"] = None
                     st.session_state["employee_last_synced"] = None
                     st.session_state["employee_external_change"] = False
-                    st.success("Employee list saved successfully!")
+                    st.success("Employee list saved and Google Sheet validation rules updated!")
                     st.rerun()
                 except Exception as e:
                     st.error(f"Failed to save employee list: {e}")
         if revert_emp_col.button("↩️ Revert Changes", type="secondary", use_container_width=True, key="revert_employees_btn"):
             del st.session_state[employee_list_key]
             st.rerun()
+
+    st.divider()
+    st.caption("💡 Sheet validation rules are updated automatically on every save. To apply them to an existing sheet without changes, use the button below.")
+    if st.button("🔧 (Re)apply Google Sheet Validation Rules", type="secondary", key="setup_validation_btn"):
+        with st.spinner("Applying validation rules to Google Sheets..."):
+            try:
+                current_emp_df, _, _ = cached_load_tab_data()
+                scheduler.setup_sheet_validation(current_emp_df)
+                st.success("Validation rules applied to Employees and Assignments sheets.")
+            except Exception as e:
+                st.error(f"Failed to apply validation rules: {e}")
 
 with tab5:
     if working_df is not None and not working_df.empty:

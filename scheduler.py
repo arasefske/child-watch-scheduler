@@ -594,6 +594,52 @@ def write_employees_to_sheet(employees_df):
     for _, row in employees_df.iterrows():
         rows.append([str(row.get(col, "")).strip() if str(row.get(col, "")) not in ("nan", "None") else "" for col in employee_cols])
     sheet.update(range_name='A1', values=rows, value_input_option="USER_ENTERED")
+    setup_sheet_validation(employees_df)
+
+def setup_sheet_validation(employees_df):
+    """Applies data-validation rules to the Employees and Assignments sheets.
+    Run after every employee save so the Assigned Employee dropdown in Assignments
+    always reflects the current roster."""
+    try:
+        emp_sheet = workbook.worksheet("Employees")
+        asgn_sheet = workbook.worksheet("Assignments")
+    except gspread.exceptions.WorksheetNotFound:
+        return
+
+    emp_id = emp_sheet.id
+    asgn_id = asgn_sheet.id
+    # Cover enough rows to avoid rebuilding validation on every save.
+    emp_rows = max(len(employees_df) + 10, 200)
+
+    requests = [
+        # Employees!B — Status: strict dropdown (active / inactive)
+        {"setDataValidation": {
+            "range": {"sheetId": emp_id, "startRowIndex": 1, "endRowIndex": 1000, "startColumnIndex": 1, "endColumnIndex": 2},
+            "rule": {"condition": {"type": "ONE_OF_LIST", "values": [{"userEnteredValue": "active"}, {"userEnteredValue": "inactive"}]}, "showCustomUi": True, "strict": True}
+        }},
+        # Employees!E — Min Hours: number >= 0 (non-strict so blank is allowed)
+        {"setDataValidation": {
+            "range": {"sheetId": emp_id, "startRowIndex": 1, "endRowIndex": 1000, "startColumnIndex": 4, "endColumnIndex": 5},
+            "rule": {"condition": {"type": "NUMBER_GREATER_EQ", "values": [{"userEnteredValue": "0"}]}, "showCustomUi": True, "strict": False}
+        }},
+        # Employees!F — Max Hours: number >= 0 (non-strict so blank is allowed)
+        {"setDataValidation": {
+            "range": {"sheetId": emp_id, "startRowIndex": 1, "endRowIndex": 1000, "startColumnIndex": 5, "endColumnIndex": 6},
+            "rule": {"condition": {"type": "NUMBER_GREATER_EQ", "values": [{"userEnteredValue": "0"}]}, "showCustomUi": True, "strict": False}
+        }},
+        # Employees!G — Start Date: must be a valid date (non-strict so blank is allowed)
+        {"setDataValidation": {
+            "range": {"sheetId": emp_id, "startRowIndex": 1, "endRowIndex": 1000, "startColumnIndex": 6, "endColumnIndex": 7},
+            "rule": {"condition": {"type": "DATE_IS_VALID"}, "showCustomUi": True, "strict": False}
+        }},
+        # Assignments!F — Assigned Employee: dropdown from Employees list (non-strict so
+        # empty cells are allowed for unassigned / GAP slots)
+        {"setDataValidation": {
+            "range": {"sheetId": asgn_id, "startRowIndex": 1, "endRowIndex": 50000, "startColumnIndex": 5, "endColumnIndex": 6},
+            "rule": {"condition": {"type": "ONE_OF_RANGE", "values": [{"userEnteredValue": f"=Employees!$A$2:$A${emp_rows}"}]}, "showCustomUi": True, "strict": False}
+        }},
+    ]
+    workbook.batch_update({"requests": requests})
 
 def run_initialize_blanks(target_year, target_month):
     print(f"Initializing blank matrix for {target_year}-{target_month:02d}...")
