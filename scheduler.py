@@ -70,28 +70,36 @@ def fetch_clean_dataframe(worksheet_name, fallback_columns):
 
 def calculate_hours(start_str, end_str):
     """Calculates the duration of a shift in hours."""
-    fmt = "%I:%M %p"
-    try:
-        start = datetime.strptime(start_str, fmt)
-        end = datetime.strptime(end_str, fmt)
-        if end <= start:
-            end += timedelta(days=1)
-        return (end - start).total_seconds() / 3600.0
-    except ValueError:
-        return 0.0
+    for fmt in ("%I:%M %p", "%I:%M%p", "%H:%M"):
+        try:
+            start = datetime.strptime(start_str.strip(), fmt)
+            end = datetime.strptime(end_str.strip(), fmt)
+            if end <= start:
+                end += timedelta(days=1)
+            return (end - start).total_seconds() / 3600.0
+        except ValueError:
+            continue
+    return 0.0
 
 def normalize_date_string(value):
-    """Validates a 'YYYY-MM-DD' date string and re-formats it through strftime, returning ''
-    for anything blank or unparseable. This matters because strptime's %m/%d directives accept
-    non-zero-padded input (e.g. '2026-9-1' parses fine), but every date comparison elsewhere in
-    this app is a plain string comparison — and '2026-10-01' < '2026-9-15' as strings, which is
-    chronologically backwards. Always compare the normalized (zero-padded) form, never the raw
-    user-entered text."""
+    """Normalizes a date string to zero-padded 'YYYY-MM-DD', returning '' for anything blank
+    or unparseable. Accepts multiple common input formats. The canonical output form matters
+    because every date comparison in this app is a plain string comparison — '2026-10-01' <
+    '2026-9-15' as strings (chronologically backwards), so always compare the normalized form."""
     value = str(value).strip()
-    try:
-        return datetime.strptime(value, "%Y-%m-%d").strftime("%Y-%m-%d")
-    except ValueError:
+    if not value or value.lower() in ("nan", "none"):
         return ""
+    for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y", "%B %d, %Y", "%b %d, %Y", "%B %d %Y", "%b %d %Y"):
+        try:
+            return datetime.strptime(value, fmt).strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+    return ""
+
+def normalize_name(name):
+    """Lowercase-stripped employee name for case-insensitive comparisons.
+    Use original casing for storage and display; only use this for dict-key lookups."""
+    return str(name).strip().lower()
 
 def local_python_date_parse(deviations_text):
     """Optimization: Extract standalone explicit YYYY-MM-DD dates directly via regex to guarantee accuracy."""
@@ -676,7 +684,10 @@ def run_auto_assignment(target_year, target_month, overwrite=False):
 
     tracking_hours = {row['Employee Name']: 0.0 for _, row in active_employees.iterrows()}
     tracking_shifts = {row['Employee Name']: 0 for _, row in active_employees.iterrows()}
-    daily_assignments = {} 
+    # Case-insensitive lookup from normalized name → canonical name (from Employees sheet).
+    # Resolves case drift when Assignments has "jane smith" but Employees has "Jane Smith".
+    _name_lookup = {normalize_name(n): n for n in tracking_hours}
+    daily_assignments = {}
     
     # Pre-cache max/min hours for faster lookup
     max_hours_map = {}
@@ -716,7 +727,14 @@ def run_auto_assignment(target_year, target_month, overwrite=False):
             shift_duration_cache[key] = calculate_hours(slot['Start Time'], slot['End Time'])
 
     for slot in slots_to_process:
-        emp_name = slot.get('Assigned Employee', '')
+        raw_name = slot.get('Assigned Employee', '')
+        if raw_name and raw_name != "GAP":
+            canonical = _name_lookup.get(normalize_name(raw_name), raw_name)
+            if canonical != raw_name:
+                slot['Assigned Employee'] = canonical
+            emp_name = canonical
+        else:
+            emp_name = raw_name
         if emp_name and emp_name != "GAP" and emp_name in tracking_hours:
             tracking_hours[emp_name] += shift_duration_cache[(slot['Start Time'], slot['End Time'])]
             tracking_shifts[emp_name] += 1
@@ -734,9 +752,12 @@ def run_auto_assignment(target_year, target_month, overwrite=False):
     # Shuffle before stable-sort so ties in Max Hours are broken randomly,
     # preventing the same employees from always winning the first pick.
     active_employees_pass1 = active_employees.sample(frac=1, random_state=random.randint(0, 9999)).copy()
-    active_employees_pass1['Max Sort'] = active_employees_pass1['Max Hours'].apply(
-        lambda x: float(x) if str(x).strip() != "" else 999.0
-    )
+    def _safe_float_max(x):
+        try:
+            return float(x) if str(x).strip() not in ("", "nan") else 999.0
+        except (ValueError, TypeError):
+            return 999.0
+    active_employees_pass1['Max Sort'] = active_employees_pass1['Max Hours'].apply(_safe_float_max)
     # Sort restricted (low max-hour) employees FIRST so they claim their narrow pool of
     # compatible slots before flexible, high-max-hour employees consume them. Flexible
     # employees have the most room to absorb whatever is left over in Pass 2.
@@ -994,10 +1015,11 @@ def find_new_hire_candidate_shifts(target_year, target_month, employee_name, rul
     employees_df, _, _ = load_tab_data()
     active_employees = employees_df[employees_df['Status'].str.lower() == 'active']
 
-    target_rows = active_employees[active_employees['Employee Name'] == employee_name]
+    target_rows = active_employees[active_employees['Employee Name'].apply(normalize_name) == normalize_name(employee_name)]
     if target_rows.empty:
         raise Exception(f"'{employee_name}' is not an active employee.")
     target_employee = target_rows.iloc[0]
+    employee_name = target_employee['Employee Name']  # use canonical casing from Employees sheet
     target_rules = rules_map.get(employee_name, {})
 
     today_str = datetime.now().strftime("%Y-%m-%d")
@@ -1023,7 +1045,7 @@ def find_new_hire_candidate_shifts(target_year, target_month, employee_name, rul
     min_hours_by_employee = {}
     for _, emp in active_employees.iterrows():
         name = emp['Employee Name']
-        emp_rows = month_df[month_df['Assigned Employee'] == name]
+        emp_rows = month_df[month_df['Assigned Employee'].apply(normalize_name) == normalize_name(name)]
         hours_by_employee[name] = sum(calculate_hours(r['Start Time'], r['End Time']) for _, r in emp_rows.iterrows())
         try:
             min_hours_by_employee[name] = float(emp['Min Hours']) if str(emp['Min Hours']).strip() != "" else 0.0
@@ -1032,13 +1054,13 @@ def find_new_hire_candidate_shifts(target_year, target_month, employee_name, rul
 
     target_hours = hours_by_employee.get(employee_name, 0.0)
     target_day_shifts = {}
-    for _, row in month_df[month_df['Assigned Employee'] == employee_name].iterrows():
+    for _, row in month_df[month_df['Assigned Employee'].apply(normalize_name) == normalize_name(employee_name)].iterrows():
         target_day_shifts.setdefault(row['Date'], []).append(row['Start Time'])
 
     candidates = []
     for _, row in month_df.iterrows():
         donor = row['Assigned Employee']
-        if not donor or donor in ("GAP", employee_name):
+        if not donor or normalize_name(donor) in ("gap", normalize_name(employee_name)):
             continue
         if row['Date'] < eligible_from:
             continue

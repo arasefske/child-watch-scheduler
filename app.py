@@ -843,7 +843,13 @@ with tab3:
                     emp_shifts = entry["shifts"]
                     hours_issue = entry["hours_issue"]
                     conflict_count = int(emp_shifts['Conflict'].sum()) if not emp_shifts.empty else 0
-                    issue_count = conflict_count + (1 if hours_issue else 0)
+
+                    try:
+                        max_h_zero = str(employee.get('Max Hours', '')).strip() not in ('', 'nan') and float(employee['Max Hours']) == 0
+                    except (ValueError, TypeError):
+                        max_h_zero = False
+
+                    issue_count = conflict_count + (1 if hours_issue else 0) + (1 if max_h_zero else 0)
 
                     if show_conflicts_only and issue_count == 0:
                         continue
@@ -853,6 +859,7 @@ with tab3:
                         "name": name,
                         "emp_shifts": emp_shifts,
                         "hours_issue": hours_issue,
+                        "max_h_zero": max_h_zero,
                         "conflict_count": conflict_count,
                         "issue_count": issue_count,
                         "shifts_field": f"Shifts: {len(emp_shifts)}",
@@ -911,6 +918,9 @@ with tab3:
                         if hours_issue:
                             st.warning(f"🚨 Hour cap violation — likely from a manual edit: {hours_issue}")
 
+                        if row.get("max_h_zero"):
+                            st.warning(f"⚠️ Max Hours is set to 0 — this employee will never be assigned any shifts. Update their Max Hours in the Employee List tab.")
+
                         if not emp_shifts.empty:
                             if conflict_count > 0:
                                 parsed_rules = rules_map.get(name, {})
@@ -932,6 +942,39 @@ with tab3:
                             st.info(f"No active shift components mapped to {name} inside this calendar cross-section.")
             else:
                 st.warning("No active employees configured inside the roster system.")
+
+            # --- Data Quality Checks ---
+            st.divider()
+            st.subheader("Data Quality Checks")
+
+            known_names = set(employees_df['Employee Name'].str.strip().str.lower()) if not employees_df.empty else set()
+            assigned_in_schedule = {
+                str(n).strip() for n in working_df['Assigned Employee'].dropna().unique()
+                if str(n).strip() not in ("", "GAP")
+            }
+            orphaned_names = {n for n in assigned_in_schedule if n.lower() not in known_names}
+
+            if orphaned_names:
+                st.error(f"🔴 {len(orphaned_names)} name(s) in the schedule have no matching entry in the Employee List — they may have been deleted or renamed directly in the sheet:")
+                for oname in sorted(orphaned_names):
+                    st.markdown(f"- **{oname}**")
+            else:
+                st.success("✅ All assigned employee names match the Employee List.")
+
+            from collections import Counter
+            dup_counts = Counter(
+                (str(row['Date']), str(row['Start Time']), str(row['Assigned Employee']))
+                for _, row in working_df.iterrows()
+                if str(row.get('Assigned Employee', '')).strip() not in ('', 'GAP')
+            )
+            dup_keys = {k: v for k, v in dup_counts.items() if v > 1}
+            if dup_keys:
+                st.warning(f"⚠️ {len(dup_keys)} duplicate assignment(s) found — the same employee appears more than once in the same slot:")
+                for (d, t, emp), cnt in sorted(dup_keys.items()):
+                    st.markdown(f"- **{emp}** on {d} at {t} — appears {cnt}× in the sheet")
+            else:
+                st.success("✅ No duplicate assignments found.")
+
         except Exception as e:
             st.error(f"Failed to compile audit summary profile matrix: {e}")
     else:
@@ -952,8 +995,11 @@ with tab4:
     def _parse_start_date(s):
         if not s or str(s).strip() in ("", "nan", "None"):
             return None
+        normalized = scheduler.normalize_date_string(str(s).strip())
+        if not normalized:
+            return None
         try:
-            return datetime.strptime(str(s).strip(), "%Y-%m-%d").date()
+            return datetime.strptime(normalized, "%Y-%m-%d").date()
         except ValueError:
             return None
     display_df['Start Date'] = display_df['Start Date'].apply(_parse_start_date)
@@ -1029,6 +1075,7 @@ with tab4:
     if not edited_employees.equals(display_df):
         # --- Server-side validation before save ---
         save_errors = []
+        save_warnings = []
         seen_names = set()
         for idx, row in edited_employees.iterrows():
             name = str(row.get('Employee Name') or "").strip()
@@ -1046,10 +1093,16 @@ with tab4:
                         save_errors.append(f"**{name}**: Max Hours ({max_h:.1f}) cannot be less than Min Hours ({min_h:.1f}).")
             except (TypeError, ValueError):
                 pass
+            rules_text = str(row.get('Default Rules') or "")
+            if len(rules_text) > 500:
+                save_warnings.append(f"**{name}**: Default Rules is very long ({len(rules_text)} chars). Consider shortening to under 500 characters for reliable AI scheduling.")
 
         if save_errors:
             for err in save_errors:
                 st.error(err)
+        if save_warnings:
+            for warn in save_warnings:
+                st.warning(warn)
 
         save_emp_col, revert_emp_col = st.columns(2)
         if save_emp_col.button("💾 Save Employee Changes to Google Sheet", type="primary", use_container_width=True, key="save_employees_btn", disabled=bool(save_errors)):
