@@ -1,0 +1,23 @@
+# Secrets and credentials — never commit these
+.env
+credentials.json
+token.json
+*.pickle
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# IDE
+.vscode/
+.idea/
