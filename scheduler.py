@@ -557,6 +557,9 @@ def build_empty_schedule_matrix(target_year, target_month, templates_df=None, ho
     if not holidays_df.empty and 'Date' in holidays_df.columns:
         holiday_map = dict(zip(holidays_df['Date'].astype(str), holidays_df['Override Type'].astype(str)))
 
+    # All known Day Types in the templates — used to validate custom Override Types.
+    template_day_types = set(templates_df['Day Type'].dropna().astype(str).str.strip().unique())
+
     new_assignments = []
     current = start_date
 
@@ -568,10 +571,27 @@ def build_empty_schedule_matrix(target_year, target_month, templates_df=None, ho
         if day_of_week == "Sunday": continue
 
         override_type = holiday_map.get(date_str)
+        # Treat "nan" / "" / None as no override
+        if not override_type or override_type in ("nan", ""):
+            override_type = None
 
         if override_type == "Closed": continue
-        
-        active_day_type = "Saturday" if (day_of_week == "Saturday" or override_type == "Saturday Template") else "Weekday"
+
+        # Explicit override takes precedence over the day-of-week default:
+        #   "Saturday Template" → legacy alias for the Saturday shifts
+        #   Any Day Type present in Shift Templates → use that template directly
+        #   Unknown value → fall back to day-of-week default with a warning
+        if override_type is not None:
+            if override_type == "Saturday Template":
+                active_day_type = "Saturday"
+            elif override_type in template_day_types:
+                active_day_type = override_type
+            else:
+                print(f"[WARN] Holiday on {date_str} has Override Type '{override_type}' which doesn't match any Shift Template Day Type. Falling back to day-of-week default.")
+                active_day_type = "Saturday" if day_of_week == "Saturday" else "Weekday"
+        else:
+            active_day_type = "Saturday" if day_of_week == "Saturday" else "Weekday"
+
         matching_shifts = templates_df[templates_df['Day Type'] == active_day_type]
 
         for _, shift in matching_shifts.iterrows():
@@ -600,7 +620,7 @@ def _normalize_field_for_diff(col, val):
         return ''
     if col == 'Status':
         return s.lower()
-    if col == 'Start Date':
+    if col in ('Start Date', 'Date'):
         return normalize_date_string(s) or s
     if col in ('Min Hours', 'Max Hours', 'Staff Required'):
         try:
@@ -723,6 +743,77 @@ def write_templates_to_sheet(templates_df):
             staff_val,
         ])
     sheet.update(range_name='A1', values=rows, value_input_option="USER_ENTERED")
+
+def write_holidays_to_sheet(holidays_df):
+    """Overwrites the Holidays sheet. Day of Week and Day Type are auto-computed from Date."""
+    holiday_cols = ['Date', 'Day of Week', 'Day Type', 'Name', 'Override Type']
+    sheet = workbook.worksheet("Holidays")
+    sheet.clear()
+    rows = [holiday_cols]
+    for _, row in holidays_df.iterrows():
+        date_str = normalize_date_string(str(row.get('Date', '')).strip())
+        day_of_week, day_type = "", ""
+        if date_str:
+            try:
+                d = datetime.strptime(date_str, "%Y-%m-%d")
+                day_of_week = d.strftime("%A")
+                day_type = "Saturday" if d.weekday() == 5 else "Weekday"
+            except ValueError:
+                pass
+        override = str(row.get('Override Type', '')).strip()
+        if override.lower() in ('nan', 'none'):
+            override = ''
+        rows.append([date_str, day_of_week, day_type, str(row.get('Name', '')).strip(), override])
+    sheet.update(range_name='A1', values=rows, value_input_option="USER_ENTERED")
+
+def log_holiday_changes(old_df, new_df, edited_by=APP_EDITED_BY):
+    """Diffs old vs new Holidays DataFrames and appends adds/edits/removals to History."""
+    timestamp = datetime.now().strftime("%Y-%m-%d %I:%M:%S %p")
+    entries = []
+
+    def make_key(row):
+        return normalize_date_string(str(row.get('Date', '')).strip())
+
+    def norm(row, col):
+        return _normalize_field_for_diff(col, row.get(col, ''))
+
+    old_map = {make_key(r): dict(r) for _, r in old_df.iterrows() if make_key(r)}
+    new_map = {make_key(r): dict(r) for _, r in new_df.iterrows() if make_key(r)}
+
+    for key, new_row in new_map.items():
+        name = str(new_row.get('Name', '')).strip()
+        dow = str(new_row.get('Day of Week', '')).strip()
+        if key not in old_map:
+            override_label = norm(new_row, 'Override Type') or 'default'
+            entries.append({"timestamp": timestamp, "method": "Holiday Added",
+                            "date": key, "day_of_week": dow, "start_time": "",
+                            "old_employee": "", "new_employee": "",
+                            "edited_by": edited_by,
+                            "details": f"Holiday added: {name} ({key}), Override: {override_label}"})
+        else:
+            old_row = old_map[key]
+            changes = [f"{col}: {norm(old_row, col) or '(blank)'} → {norm(new_row, col) or '(blank)'}"
+                       for col in ('Name', 'Override Type')
+                       if norm(old_row, col) != norm(new_row, col)]
+            if changes:
+                entries.append({"timestamp": timestamp, "method": "Holiday Updated",
+                                "date": key, "day_of_week": dow, "start_time": "",
+                                "old_employee": "", "new_employee": "",
+                                "edited_by": edited_by, "details": "; ".join(changes)})
+
+    for key, old_row in old_map.items():
+        if key not in new_map:
+            name = str(old_row.get('Name', '')).strip()
+            dow = str(old_row.get('Day of Week', '')).strip()
+            entries.append({"timestamp": timestamp, "method": "Holiday Removed",
+                            "date": key, "day_of_week": dow, "start_time": "",
+                            "old_employee": "", "new_employee": "",
+                            "edited_by": edited_by, "details": f"Holiday removed: {name} ({key})"})
+
+    try:
+        log_history_entries(entries)
+    except Exception as e:
+        print(f"[WARN] Failed to log holiday changes to History: {e}")
 
 def write_employees_to_sheet(employees_df):
     """Overwrites the Employees sheet with the provided dataframe. Clears existing content first."""

@@ -680,9 +680,9 @@ emp_names_for_dropdown = (
     else [""]
 )
 
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "📊 Table Editor View", "📅 Calendar Grid View",
-    audit_tab_label, "👥 Employee List", "📋 Shift Templates", history_tab_label
+    audit_tab_label, "👥 Employee List", "📋 Shift Templates", "🗓️ Holidays", history_tab_label
 ])
 
 with tab1:
@@ -1170,7 +1170,7 @@ with tab5:
     st.write("Add, edit, or remove shift templates. Changes take effect the next time you run Auto-Assign or Initialize Blanks.")
     st.caption("Each row is one shift slot per day. Set **Staff Required** ≥ 1 to generate multiple open slots for the same shift.")
 
-    tmpl_df_raw, _, _ = cached_load_tab_data()
+    _, tmpl_df_raw, _ = cached_load_tab_data()
     template_cols = ['Day Type', 'Start Time', 'End Time', 'Staff Required']
     display_tmpl_df = tmpl_df_raw[template_cols].copy()
     # Coerce Staff Required to int so the NumberColumn renders correctly.
@@ -1244,7 +1244,7 @@ with tab5:
         hide_index=True,
         num_rows="dynamic",
         column_config={
-            "Day Type": st.column_config.SelectboxColumn("Day Type", options=["Weekday", "Saturday"], required=True),
+            "Day Type": st.column_config.TextColumn("Day Type", help="Built-in: 'Weekday' or 'Saturday'. Add any custom name (e.g. 'Short Day') and reference it as a Holiday Override Type.", required=True),
             "Start Time": st.column_config.TextColumn("Start Time", help="e.g. '9:00 AM' or '14:00'", required=True),
             "End Time": st.column_config.TextColumn("End Time", help="e.g. '1:00 PM' or '17:00'", required=True),
             "Staff Required": st.column_config.NumberColumn("Staff Required", min_value=1, step=1, format="%d"),
@@ -1316,6 +1316,166 @@ with tab5:
             st.rerun()
 
 with tab6:
+    st.write("Add, edit, or remove holidays. Set an **Override Type** to control which shift template is used on that day.")
+    st.caption("Leave Override Type blank for the day-of-week default (Weekday or Saturday). Use **Closed** to skip the day entirely. Or enter any Day Type from the Shift Templates tab to use a custom schedule.")
+
+    _, tmpl_df_for_holidays, holidays_df_raw = cached_load_tab_data()
+
+    # Build Override Type options dynamically from current Shift Template Day Types.
+    all_day_types = sorted(tmpl_df_for_holidays['Day Type'].dropna().astype(str).str.strip().unique().tolist())
+    holiday_override_options = ["", "Closed"] + all_day_types
+
+    holiday_display_cols = ['Date', 'Name', 'Override Type']
+    display_holidays_df = holidays_df_raw[holiday_display_cols].copy()
+
+    def _parse_holiday_date(s):
+        if not s or str(s).strip() in ("", "nan", "None"):
+            return None
+        normalized = scheduler.normalize_date_string(str(s).strip())
+        if not normalized:
+            return None
+        try:
+            return datetime.strptime(normalized, "%Y-%m-%d").date()
+        except ValueError:
+            return None
+
+    display_holidays_df['Date'] = display_holidays_df['Date'].apply(_parse_holiday_date)
+    display_holidays_df['Override Type'] = display_holidays_df['Override Type'].apply(
+        lambda v: "" if str(v).strip().lower() in ("nan", "none") else str(v).strip()
+    )
+
+    if "holiday_data_hash" not in st.session_state:
+        st.session_state["holiday_data_hash"] = None
+    if "holiday_last_synced" not in st.session_state:
+        st.session_state["holiday_last_synced"] = None
+    if "holiday_external_change" not in st.session_state:
+        st.session_state["holiday_external_change"] = False
+    if "holiday_snapshot_csv" not in st.session_state:
+        st.session_state["holiday_snapshot_csv"] = None
+
+    current_holiday_hash = hash(display_holidays_df.to_csv(index=False))
+    if st.session_state["holiday_data_hash"] is None:
+        st.session_state["holiday_data_hash"] = current_holiday_hash
+        st.session_state["holiday_last_synced"] = datetime.now()
+        st.session_state["holiday_snapshot_csv"] = holidays_df_raw.to_csv(index=False)
+    elif current_holiday_hash != st.session_state["holiday_data_hash"]:
+        old_holiday_csv = st.session_state.get("holiday_snapshot_csv")
+        if old_holiday_csv:
+            try:
+                import io
+                old_holiday_df = pd.read_csv(io.StringIO(old_holiday_csv)).fillna("")
+                scheduler.log_holiday_changes(old_holiday_df, holidays_df_raw, edited_by="Direct Sheet Edit")
+            except Exception as _e:
+                print(f"[WARN] Could not log direct holiday sheet edit to History: {_e}")
+        st.session_state["holiday_data_hash"] = current_holiday_hash
+        st.session_state["holiday_last_synced"] = datetime.now()
+        st.session_state["holiday_snapshot_csv"] = holidays_df_raw.to_csv(index=False)
+        st.session_state["holiday_external_change"] = True
+
+    if st.session_state["holiday_external_change"]:
+        h_banner_col, h_dismiss_col = st.columns([5, 1])
+        with h_banner_col:
+            st.warning("⚠️ Holidays were changed outside this app. The table below already reflects the latest data.")
+        with h_dismiss_col:
+            st.write("")
+            if st.button("Dismiss", key="dismiss_holiday_change"):
+                st.session_state["holiday_external_change"] = False
+                st.rerun()
+
+    h_sync_col, h_refresh_col = st.columns([5, 1])
+    with h_sync_col:
+        if st.session_state["holiday_last_synced"]:
+            elapsed = int((datetime.now() - st.session_state["holiday_last_synced"]).total_seconds())
+            if elapsed < 60:
+                h_sync_label = "just now"
+            elif elapsed < 3600:
+                m = elapsed // 60
+                h_sync_label = f"{m} minute{'s' if m != 1 else ''} ago"
+            else:
+                h = elapsed // 3600
+                h_sync_label = f"{h} hour{'s' if h != 1 else ''} ago"
+            st.caption(f"Last synced from Google Sheets: {h_sync_label}")
+    with h_refresh_col:
+        if st.button("🔄 Refresh", use_container_width=True, key="refresh_holidays_btn"):
+            st.cache_data.clear()
+            st.session_state["holiday_data_hash"] = None
+            st.session_state["holiday_last_synced"] = None
+            st.session_state["holiday_external_change"] = False
+            st.session_state["holiday_snapshot_csv"] = None
+            st.rerun()
+
+    holiday_editor_key = "holiday_list_editor"
+    edited_holidays = st.data_editor(
+        display_holidays_df,
+        use_container_width=True,
+        hide_index=True,
+        num_rows="dynamic",
+        column_config={
+            "Date": st.column_config.DateColumn("Date", format="YYYY-MM-DD", required=True),
+            "Name": st.column_config.TextColumn("Name", help="e.g. 'Christmas', 'Thanksgiving'", required=True),
+            "Override Type": st.column_config.SelectboxColumn("Override Type", options=holiday_override_options,
+                help="Blank = day-of-week default. 'Closed' = skip. Any Shift Template Day Type = use that schedule."),
+        },
+        key=holiday_editor_key,
+    )
+
+    if not edited_holidays.equals(display_holidays_df):
+        holiday_errors = []
+        seen_dates = set()
+        for idx, row in edited_holidays.iterrows():
+            h_date = row.get('Date')
+            h_name = str(row.get('Name') or "").strip()
+            h_override = str(row.get('Override Type') or "").strip()
+
+            if not h_date:
+                holiday_errors.append(f"Row {idx + 1}: Date cannot be blank.")
+                continue
+            if not h_name:
+                holiday_errors.append(f"Row {idx + 1}: Name cannot be blank.")
+
+            date_key = str(h_date)
+            if date_key in seen_dates:
+                holiday_errors.append(f"Duplicate date: **{date_key}** — each date can only appear once.")
+            seen_dates.add(date_key)
+
+            if h_override and h_override not in holiday_override_options:
+                holiday_errors.append(f"**{date_key}** ({h_name}): Override Type '{h_override}' is not a known Day Type. Add it to Shift Templates first.")
+
+        if holiday_errors:
+            for err in holiday_errors:
+                st.error(err)
+
+        save_h_col, revert_h_col = st.columns(2)
+        if save_h_col.button("💾 Save Holiday Changes to Google Sheet", type="primary", use_container_width=True, key="save_holidays_btn", disabled=bool(holiday_errors)):
+            with st.spinner("Saving holidays to Google Sheets..."):
+                try:
+                    def _fmt_holiday_date(d):
+                        try:
+                            return d.strftime("%Y-%m-%d") if isinstance(d, date) else ""
+                        except AttributeError:
+                            return ""
+                    clean_holidays_df = edited_holidays.dropna(subset=["Date"]).copy()
+                    clean_holidays_df['Date'] = clean_holidays_df['Date'].apply(_fmt_holiday_date)
+                    clean_holidays_df = clean_holidays_df[clean_holidays_df['Date'] != ""]
+                    try:
+                        scheduler.log_holiday_changes(holidays_df_raw, clean_holidays_df)
+                    except Exception as _e:
+                        print(f"[WARN] Failed to log holiday changes to History: {_e}")
+                    scheduler.write_holidays_to_sheet(clean_holidays_df)
+                    st.cache_data.clear()
+                    st.session_state["holiday_data_hash"] = None
+                    st.session_state["holiday_last_synced"] = None
+                    st.session_state["holiday_external_change"] = False
+                    st.session_state["holiday_snapshot_csv"] = None
+                    st.success("Holidays saved to Google Sheets!")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Failed to save holidays: {e}")
+        if revert_h_col.button("↩️ Revert Changes", type="secondary", use_container_width=True, key="revert_holidays_btn"):
+            del st.session_state[holiday_editor_key]
+            st.rerun()
+
+with tab7:
     if working_df is not None and not working_df.empty:
         st.write("Every change made to the Assignments sheet — through this app or directly in Google Sheets.")
         try:
