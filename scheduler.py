@@ -732,9 +732,9 @@ def log_template_changes(old_df, new_df, edited_by=APP_EDITED_BY):
 
 def write_templates_to_sheet(templates_df):
     """Overwrites the Shift Templates sheet with the provided dataframe."""
+    if templates_df is None or len(templates_df) == 0:
+        raise ValueError("Refusing to clear Shift Templates: payload is empty. Provide at least one template row.")
     template_cols = ['Day Type', 'Start Time', 'End Time', 'Staff Required']
-    sheet = workbook.worksheet("Shift Templates")
-    sheet.clear()
     rows = [template_cols]
     for _, row in templates_df.iterrows():
         staff_val = row.get('Staff Required', '')
@@ -748,13 +748,17 @@ def write_templates_to_sheet(templates_df):
             str(row.get('End Time', '')).strip(),
             staff_val,
         ])
+    # Validate full payload is serializable before touching the sheet.
+    json.dumps(rows)
+    sheet = workbook.worksheet("Shift Templates")
+    sheet.clear()
     sheet.update(range_name='A1', values=rows, value_input_option="USER_ENTERED")
 
 def write_holidays_to_sheet(holidays_df):
     """Overwrites the Holidays sheet. Day of Week and Day Type are auto-computed from Date."""
+    if holidays_df is None or len(holidays_df) == 0:
+        raise ValueError("Refusing to clear Holidays: payload is empty. Provide at least one holiday row.")
     holiday_cols = ['Date', 'Day of Week', 'Day Type', 'Name', 'Override Type']
-    sheet = workbook.worksheet("Holidays")
-    sheet.clear()
     rows = [holiday_cols]
     for _, row in holidays_df.iterrows():
         date_str = normalize_date_string(str(row.get('Date', '')).strip())
@@ -770,6 +774,10 @@ def write_holidays_to_sheet(holidays_df):
         if override.lower() in ('nan', 'none'):
             override = ''
         rows.append([date_str, day_of_week, day_type, str(row.get('Name', '')).strip(), override])
+    # Validate full payload is serializable before touching the sheet.
+    json.dumps(rows)
+    sheet = workbook.worksheet("Holidays")
+    sheet.clear()
     sheet.update(range_name='A1', values=rows, value_input_option="USER_ENTERED")
 
 def log_holiday_changes(old_df, new_df, edited_by=APP_EDITED_BY):
@@ -823,12 +831,16 @@ def log_holiday_changes(old_df, new_df, edited_by=APP_EDITED_BY):
 
 def write_employees_to_sheet(employees_df):
     """Overwrites the Employees sheet with the provided dataframe. Clears existing content first."""
+    if employees_df is None or len(employees_df) == 0:
+        raise ValueError("Refusing to clear Employees: payload is empty. Provide at least one employee row.")
     employee_cols = ['Employee Name', 'Status', 'Default Rules', 'Blocked Dates', 'Min Hours', 'Max Hours', 'Start Date']
-    sheet = workbook.worksheet("Employees")
-    sheet.clear()
     rows = [employee_cols]
     for _, row in employees_df.iterrows():
         rows.append([str(row.get(col, "")).strip() if str(row.get(col, "")) not in ("nan", "None") else "" for col in employee_cols])
+    # Validate full payload is serializable before touching the sheet.
+    json.dumps(rows)
+    sheet = workbook.worksheet("Employees")
+    sheet.clear()
     sheet.update(range_name='A1', values=rows, value_input_option="USER_ENTERED")
     setup_sheet_validation(employees_df)
 

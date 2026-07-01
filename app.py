@@ -1135,20 +1135,24 @@ with tab4:
                         clean_save_df[_col] = clean_save_df[_col].apply(
                             lambda v: "" if pd.isna(v) else (str(int(v)) if v == int(v) else str(v))
                         )
-                    # Log the diff before writing so emp_df_for_list still holds the pre-save state.
-                    try:
-                        scheduler.log_employee_changes(emp_df_for_list, clean_save_df)
-                    except Exception as _e:
-                        print(f"[WARN] Failed to log employee changes to History: {_e}")
-                    scheduler.write_employees_to_sheet(clean_save_df)
-                    st.cache_data.clear()
-                    # Reset hash and snapshot so the next render initializes fresh.
-                    st.session_state["employee_data_hash"] = None
-                    st.session_state["employee_last_synced"] = None
-                    st.session_state["employee_external_change"] = False
-                    st.session_state["employee_snapshot_csv"] = None
-                    st.success("Employee list saved and Google Sheet validation rules updated!")
-                    st.rerun()
+                    # Load fresh sheet data: detect concurrent changes, and use as accurate "before" state for history.
+                    fresh_emp_df, _, _ = scheduler.load_tab_data()
+                    if (st.session_state.get("employee_snapshot_csv") and
+                            fresh_emp_df.to_csv(index=False) != st.session_state["employee_snapshot_csv"]):
+                        st.error("⚠️ The Employees sheet was modified since you loaded this view. Click 🔄 Refresh to load the latest data, then re-apply your changes.")
+                    else:
+                        try:
+                            scheduler.log_employee_changes(fresh_emp_df, clean_save_df)
+                        except Exception as _e:
+                            print(f"[WARN] Failed to log employee changes to History: {_e}")
+                        scheduler.write_employees_to_sheet(clean_save_df)
+                        st.cache_data.clear()
+                        st.session_state["employee_data_hash"] = None
+                        st.session_state["employee_last_synced"] = None
+                        st.session_state["employee_external_change"] = False
+                        st.session_state["employee_snapshot_csv"] = None
+                        st.success("Employee list saved and Google Sheet validation rules updated!")
+                        st.rerun()
                 except Exception as e:
                     st.error(f"Failed to save employee list: {e}")
         if revert_emp_col.button("↩️ Revert Changes", type="secondary", use_container_width=True, key="revert_employees_btn"):
@@ -1296,19 +1300,24 @@ with tab5:
                 try:
                     clean_tmpl_df = edited_templates.dropna(subset=["Day Type"]).copy()
                     clean_tmpl_df = clean_tmpl_df[clean_tmpl_df["Day Type"].astype(str).str.strip() != ""]
-                    # Log the diff before writing so tmpl_df_raw still holds the pre-save state.
-                    try:
-                        scheduler.log_template_changes(tmpl_df_raw, clean_tmpl_df)
-                    except Exception as _e:
-                        print(f"[WARN] Failed to log template changes to History: {_e}")
-                    scheduler.write_templates_to_sheet(clean_tmpl_df)
-                    st.cache_data.clear()
-                    st.session_state["template_data_hash"] = None
-                    st.session_state["template_last_synced"] = None
-                    st.session_state["template_external_change"] = False
-                    st.session_state["template_snapshot_csv"] = None
-                    st.success("Shift templates saved to Google Sheets!")
-                    st.rerun()
+                    # Load fresh sheet data: detect concurrent changes, and use as accurate "before" state for history.
+                    _, fresh_tmpl_df, _ = scheduler.load_tab_data()
+                    if (st.session_state.get("template_snapshot_csv") and
+                            fresh_tmpl_df.to_csv(index=False) != st.session_state["template_snapshot_csv"]):
+                        st.error("⚠️ The Shift Templates sheet was modified since you loaded this view. Click 🔄 Refresh to load the latest data, then re-apply your changes.")
+                    else:
+                        try:
+                            scheduler.log_template_changes(fresh_tmpl_df, clean_tmpl_df)
+                        except Exception as _e:
+                            print(f"[WARN] Failed to log template changes to History: {_e}")
+                        scheduler.write_templates_to_sheet(clean_tmpl_df)
+                        st.cache_data.clear()
+                        st.session_state["template_data_hash"] = None
+                        st.session_state["template_last_synced"] = None
+                        st.session_state["template_external_change"] = False
+                        st.session_state["template_snapshot_csv"] = None
+                        st.success("Shift templates saved to Google Sheets!")
+                        st.rerun()
                 except Exception as e:
                     st.error(f"Failed to save shift templates: {e}")
         if revert_tmpl_col.button("↩️ Revert Changes", type="secondary", use_container_width=True, key="revert_templates_btn"):
@@ -1457,18 +1466,24 @@ with tab6:
                     clean_holidays_df = edited_holidays.dropna(subset=["Date"]).copy()
                     clean_holidays_df['Date'] = clean_holidays_df['Date'].apply(_fmt_holiday_date)
                     clean_holidays_df = clean_holidays_df[clean_holidays_df['Date'] != ""]
-                    try:
-                        scheduler.log_holiday_changes(holidays_df_raw, clean_holidays_df)
-                    except Exception as _e:
-                        print(f"[WARN] Failed to log holiday changes to History: {_e}")
-                    scheduler.write_holidays_to_sheet(clean_holidays_df)
-                    st.cache_data.clear()
-                    st.session_state["holiday_data_hash"] = None
-                    st.session_state["holiday_last_synced"] = None
-                    st.session_state["holiday_external_change"] = False
-                    st.session_state["holiday_snapshot_csv"] = None
-                    st.success("Holidays saved to Google Sheets!")
-                    st.rerun()
+                    # Load fresh sheet data: detect concurrent changes, and use as accurate "before" state for history.
+                    _, _, fresh_holidays_df = scheduler.load_tab_data()
+                    if (st.session_state.get("holiday_snapshot_csv") and
+                            fresh_holidays_df.to_csv(index=False) != st.session_state["holiday_snapshot_csv"]):
+                        st.error("⚠️ The Holidays sheet was modified since you loaded this view. Click 🔄 Refresh to load the latest data, then re-apply your changes.")
+                    else:
+                        try:
+                            scheduler.log_holiday_changes(fresh_holidays_df, clean_holidays_df)
+                        except Exception as _e:
+                            print(f"[WARN] Failed to log holiday changes to History: {_e}")
+                        scheduler.write_holidays_to_sheet(clean_holidays_df)
+                        st.cache_data.clear()
+                        st.session_state["holiday_data_hash"] = None
+                        st.session_state["holiday_last_synced"] = None
+                        st.session_state["holiday_external_change"] = False
+                        st.session_state["holiday_snapshot_csv"] = None
+                        st.success("Holidays saved to Google Sheets!")
+                        st.rerun()
                 except Exception as e:
                     st.error(f"Failed to save holidays: {e}")
         if revert_h_col.button("↩️ Revert Changes", type="secondary", use_container_width=True, key="revert_holidays_btn"):
