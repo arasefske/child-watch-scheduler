@@ -593,6 +593,117 @@ def load_tab_data():
     holiday_cols = ['Date', 'Day of Week', 'Day Type', 'Name', 'Override Type']
     return fetch_clean_dataframe("Employees", employee_cols), fetch_clean_dataframe("Shift Templates", template_cols), fetch_clean_dataframe("Holidays", holiday_cols)
 
+def _normalize_field_for_diff(col, val):
+    """Normalize a single field value for apples-to-apples diffing across sheets."""
+    s = str(val).strip()
+    if s.lower() in ('nan', 'none', ''):
+        return ''
+    if col == 'Status':
+        return s.lower()
+    if col == 'Start Date':
+        return normalize_date_string(s) or s
+    if col in ('Min Hours', 'Max Hours', 'Staff Required'):
+        try:
+            f = float(s)
+            return str(int(f)) if f == int(f) else str(round(f, 2))
+        except (ValueError, TypeError):
+            return s
+    return s
+
+def log_employee_changes(old_df, new_df, edited_by=APP_EDITED_BY):
+    """Diffs old vs new Employees DataFrames and appends adds/edits/removals to History."""
+    timestamp = datetime.now().strftime("%Y-%m-%d %I:%M:%S %p")
+    employee_cols = ['Employee Name', 'Status', 'Default Rules', 'Blocked Dates', 'Min Hours', 'Max Hours', 'Start Date']
+    entries = []
+
+    def norm(row, col):
+        return _normalize_field_for_diff(col, row.get(col, ''))
+
+    old_map = {_normalize_field_for_diff('Employee Name', r.get('Employee Name', '')): dict(r)
+               for _, r in old_df.iterrows() if str(r.get('Employee Name', '')).strip()}
+    new_map = {_normalize_field_for_diff('Employee Name', r.get('Employee Name', '')): dict(r)
+               for _, r in new_df.iterrows() if str(r.get('Employee Name', '')).strip()}
+
+    for key, new_row in new_map.items():
+        name = str(new_row.get('Employee Name', '')).strip()
+        if key not in old_map:
+            entries.append({"timestamp": timestamp, "method": "Employee Added",
+                            "date": "", "day_of_week": "", "start_time": "",
+                            "old_employee": "", "new_employee": name,
+                            "edited_by": edited_by, "details": f"New employee added: {name}"})
+        else:
+            old_row = old_map[key]
+            changes = [f"{col}: {norm(old_row, col)} → {norm(new_row, col)}"
+                       for col in employee_cols
+                       if norm(old_row, col) != norm(new_row, col)]
+            if changes:
+                entries.append({"timestamp": timestamp, "method": "Employee Updated",
+                                "date": "", "day_of_week": "", "start_time": "",
+                                "old_employee": name, "new_employee": name,
+                                "edited_by": edited_by, "details": "; ".join(changes)})
+
+    for key, old_row in old_map.items():
+        if key not in new_map:
+            name = str(old_row.get('Employee Name', '')).strip()
+            entries.append({"timestamp": timestamp, "method": "Employee Removed",
+                            "date": "", "day_of_week": "", "start_time": "",
+                            "old_employee": name, "new_employee": "",
+                            "edited_by": edited_by, "details": f"Employee removed: {name}"})
+
+    try:
+        log_history_entries(entries)
+    except Exception as e:
+        print(f"[WARN] Failed to log employee changes to History: {e}")
+
+def log_template_changes(old_df, new_df, edited_by=APP_EDITED_BY):
+    """Diffs old vs new Shift Templates DataFrames and appends adds/edits/removals to History."""
+    timestamp = datetime.now().strftime("%Y-%m-%d %I:%M:%S %p")
+    template_cols = ['Day Type', 'Start Time', 'End Time', 'Staff Required']
+    entries = []
+
+    def norm(row, col):
+        return _normalize_field_for_diff(col, row.get(col, ''))
+
+    def make_key(row):
+        return (str(row.get('Day Type', '')).strip().lower(), str(row.get('Start Time', '')).strip().lower())
+
+    old_map = {make_key(r): dict(r) for _, r in old_df.iterrows() if str(r.get('Day Type', '')).strip()}
+    new_map = {make_key(r): dict(r) for _, r in new_df.iterrows() if str(r.get('Day Type', '')).strip()}
+
+    for key, new_row in new_map.items():
+        day_type = str(new_row.get('Day Type', '')).strip()
+        start_time = str(new_row.get('Start Time', '')).strip()
+        if key not in old_map:
+            entries.append({"timestamp": timestamp, "method": "Template Added",
+                            "date": "", "day_of_week": day_type, "start_time": start_time,
+                            "old_employee": "", "new_employee": "",
+                            "edited_by": edited_by,
+                            "details": f"New shift: {day_type} {start_time}–{str(new_row.get('End Time', '')).strip()}, Staff: {norm(new_row, 'Staff Required')}"})
+        else:
+            old_row = old_map[key]
+            changes = [f"{col}: {norm(old_row, col)} → {norm(new_row, col)}"
+                       for col in template_cols
+                       if norm(old_row, col) != norm(new_row, col)]
+            if changes:
+                entries.append({"timestamp": timestamp, "method": "Template Updated",
+                                "date": "", "day_of_week": day_type, "start_time": start_time,
+                                "old_employee": "", "new_employee": "",
+                                "edited_by": edited_by, "details": "; ".join(changes)})
+
+    for key, old_row in old_map.items():
+        if key not in new_map:
+            day_type = str(old_row.get('Day Type', '')).strip()
+            start_time = str(old_row.get('Start Time', '')).strip()
+            entries.append({"timestamp": timestamp, "method": "Template Removed",
+                            "date": "", "day_of_week": day_type, "start_time": start_time,
+                            "old_employee": "", "new_employee": "",
+                            "edited_by": edited_by, "details": f"Shift removed: {day_type} {start_time}"})
+
+    try:
+        log_history_entries(entries)
+    except Exception as e:
+        print(f"[WARN] Failed to log template changes to History: {e}")
+
 def write_templates_to_sheet(templates_df):
     """Overwrites the Shift Templates sheet with the provided dataframe."""
     template_cols = ['Day Type', 'Start Time', 'End Time', 'Staff Required']

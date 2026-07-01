@@ -86,6 +86,8 @@ if "employee_last_synced" not in st.session_state:
     st.session_state["employee_last_synced"] = None
 if "employee_external_change" not in st.session_state:
     st.session_state["employee_external_change"] = False
+if "employee_snapshot_csv" not in st.session_state:
+    st.session_state["employee_snapshot_csv"] = None
 
 active_key = f"{selected_year}-{selected_month}"
 fallback_cols = ["Date", "Day of Week", "Day Type", "Start Time", "End Time", "Assigned Employee", "Issues"]
@@ -1016,10 +1018,20 @@ with tab4:
         # First load after session start, save, or force-refresh — initialize quietly.
         st.session_state["employee_data_hash"] = current_emp_hash
         st.session_state["employee_last_synced"] = datetime.now()
+        st.session_state["employee_snapshot_csv"] = emp_df_for_list.to_csv(index=False)
     elif current_emp_hash != st.session_state["employee_data_hash"]:
-        # Cache was refreshed and data differs — flag an external change.
+        # Cache was refreshed and data differs — flag an external change and log to History.
+        old_snapshot_csv = st.session_state.get("employee_snapshot_csv")
+        if old_snapshot_csv:
+            try:
+                import io
+                old_snapshot_df = pd.read_csv(io.StringIO(old_snapshot_csv)).fillna("")
+                scheduler.log_employee_changes(old_snapshot_df, emp_df_for_list, edited_by="Direct Sheet Edit")
+            except Exception as _e:
+                print(f"[WARN] Could not log direct employee sheet edit to History: {_e}")
         st.session_state["employee_data_hash"] = current_emp_hash
         st.session_state["employee_last_synced"] = datetime.now()
+        st.session_state["employee_snapshot_csv"] = emp_df_for_list.to_csv(index=False)
         st.session_state["employee_external_change"] = True
 
     if st.session_state["employee_external_change"]:
@@ -1052,6 +1064,7 @@ with tab4:
             st.session_state["employee_data_hash"] = None
             st.session_state["employee_last_synced"] = None
             st.session_state["employee_external_change"] = False
+            st.session_state["employee_snapshot_csv"] = None
             st.rerun()
 
     employee_list_key = "employee_list_editor"
@@ -1122,13 +1135,18 @@ with tab4:
                         clean_save_df[_col] = clean_save_df[_col].apply(
                             lambda v: "" if pd.isna(v) else (str(int(v)) if v == int(v) else str(v))
                         )
+                    # Log the diff before writing so emp_df_for_list still holds the pre-save state.
+                    try:
+                        scheduler.log_employee_changes(emp_df_for_list, clean_save_df)
+                    except Exception as _e:
+                        print(f"[WARN] Failed to log employee changes to History: {_e}")
                     scheduler.write_employees_to_sheet(clean_save_df)
                     st.cache_data.clear()
-                    # Reset hash so the next render initializes fresh without a false-positive
-                    # external-change notification triggered by the data we just wrote.
+                    # Reset hash and snapshot so the next render initializes fresh.
                     st.session_state["employee_data_hash"] = None
                     st.session_state["employee_last_synced"] = None
                     st.session_state["employee_external_change"] = False
+                    st.session_state["employee_snapshot_csv"] = None
                     st.success("Employee list saved and Google Sheet validation rules updated!")
                     st.rerun()
                 except Exception as e:
@@ -1164,14 +1182,27 @@ with tab5:
         st.session_state["template_last_synced"] = None
     if "template_external_change" not in st.session_state:
         st.session_state["template_external_change"] = False
+    if "template_snapshot_csv" not in st.session_state:
+        st.session_state["template_snapshot_csv"] = None
 
     current_tmpl_hash = hash(display_tmpl_df.to_csv(index=False))
     if st.session_state["template_data_hash"] is None:
         st.session_state["template_data_hash"] = current_tmpl_hash
         st.session_state["template_last_synced"] = datetime.now()
+        st.session_state["template_snapshot_csv"] = tmpl_df_raw.to_csv(index=False)
     elif current_tmpl_hash != st.session_state["template_data_hash"]:
+        # Cache refreshed and data differs — log the external change then update state.
+        old_tmpl_snapshot_csv = st.session_state.get("template_snapshot_csv")
+        if old_tmpl_snapshot_csv:
+            try:
+                import io
+                old_tmpl_snapshot_df = pd.read_csv(io.StringIO(old_tmpl_snapshot_csv)).fillna("")
+                scheduler.log_template_changes(old_tmpl_snapshot_df, tmpl_df_raw, edited_by="Direct Sheet Edit")
+            except Exception as _e:
+                print(f"[WARN] Could not log direct template sheet edit to History: {_e}")
         st.session_state["template_data_hash"] = current_tmpl_hash
         st.session_state["template_last_synced"] = datetime.now()
+        st.session_state["template_snapshot_csv"] = tmpl_df_raw.to_csv(index=False)
         st.session_state["template_external_change"] = True
 
     if st.session_state["template_external_change"]:
@@ -1203,6 +1234,7 @@ with tab5:
             st.session_state["template_data_hash"] = None
             st.session_state["template_last_synced"] = None
             st.session_state["template_external_change"] = False
+            st.session_state["template_snapshot_csv"] = None
             st.rerun()
 
     template_editor_key = "template_list_editor"
@@ -1264,11 +1296,17 @@ with tab5:
                 try:
                     clean_tmpl_df = edited_templates.dropna(subset=["Day Type"]).copy()
                     clean_tmpl_df = clean_tmpl_df[clean_tmpl_df["Day Type"].astype(str).str.strip() != ""]
+                    # Log the diff before writing so tmpl_df_raw still holds the pre-save state.
+                    try:
+                        scheduler.log_template_changes(tmpl_df_raw, clean_tmpl_df)
+                    except Exception as _e:
+                        print(f"[WARN] Failed to log template changes to History: {_e}")
                     scheduler.write_templates_to_sheet(clean_tmpl_df)
                     st.cache_data.clear()
                     st.session_state["template_data_hash"] = None
                     st.session_state["template_last_synced"] = None
                     st.session_state["template_external_change"] = False
+                    st.session_state["template_snapshot_csv"] = None
                     st.success("Shift templates saved to Google Sheets!")
                     st.rerun()
                 except Exception as e:
