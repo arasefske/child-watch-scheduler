@@ -1,7 +1,7 @@
 import streamlit as st
 import scheduler
 import pandas as pd
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta
 import calendar
 import sys
 import io
@@ -992,19 +992,11 @@ with tab4:
     # Normalize Status to lowercase so it matches the SelectboxColumn options regardless of
     # how it was capitalized in the Google Sheet (e.g. "Active" → "active").
     display_df['Status'] = display_df['Status'].str.lower().str.strip()
-    # Parse Start Date strings into Python date objects so DateColumn renders a date picker.
-    # Empty / unparseable values become None (shown as blank in the picker).
-    def _parse_start_date(s):
-        if not s or str(s).strip() in ("", "nan", "None"):
-            return None
-        normalized = scheduler.normalize_date_string(str(s).strip())
-        if not normalized:
-            return None
-        try:
-            return datetime.strptime(normalized, "%Y-%m-%d").date()
-        except ValueError:
-            return None
-    display_df['Start Date'] = display_df['Start Date'].apply(_parse_start_date)
+    # Normalize Start Date to YYYY-MM-DD for display; empty/unparseable stays blank.
+    display_df['Start Date'] = display_df['Start Date'].apply(
+        lambda s: scheduler.normalize_date_string(str(s).strip()) or ""
+        if str(s).strip() not in ("", "nan", "None") else ""
+    )
     # Convert Min/Max Hours to float so the NumberColumn renders correctly.
     for _col in ('Min Hours', 'Max Hours'):
         display_df[_col] = pd.to_numeric(display_df[_col], errors='coerce')
@@ -1080,7 +1072,7 @@ with tab4:
             "Blocked Dates": st.column_config.TextColumn("Blocked Dates", help="e.g. '2026-07-04, 2026-07-15'"),
             "Min Hours": st.column_config.NumberColumn("Min Hours", min_value=0.0, step=0.5, format="%.1f"),
             "Max Hours": st.column_config.NumberColumn("Max Hours", min_value=0.0, step=0.5, format="%.1f"),
-            "Start Date": st.column_config.DateColumn("Start Date", format="YYYY-MM-DD", help="Leave blank if already eligible. Must be a valid date."),
+            "Start Date": st.column_config.TextColumn("Start Date", help="e.g. 2026-07-04 or 7/4/2026. Leave blank if already eligible."),
         },
         key=employee_list_key,
     )
@@ -1106,6 +1098,10 @@ with tab4:
                         save_errors.append(f"**{name}**: Max Hours ({max_h:.1f}) cannot be less than Min Hours ({min_h:.1f}).")
             except (TypeError, ValueError):
                 pass
+            start_date_raw = str(row.get('Start Date') or "").strip()
+            if start_date_raw and start_date_raw not in ("nan", "None"):
+                if not scheduler.normalize_date_string(start_date_raw):
+                    save_errors.append(f"**{name}**: Start Date '{start_date_raw}' is not a recognizable date. Use a format like 2026-07-04 or 7/4/2026.")
             rules_text = str(row.get('Default Rules') or "")
             if len(rules_text) > 500:
                 save_warnings.append(f"**{name}**: Default Rules is very long ({len(rules_text)} chars). Consider shortening to under 500 characters for reliable AI scheduling.")
@@ -1123,13 +1119,11 @@ with tab4:
                 try:
                     clean_save_df = edited_employees.dropna(subset=["Employee Name"]).copy()
                     clean_save_df = clean_save_df[clean_save_df["Employee Name"].astype(str).str.strip() != ""]
-                    # Convert date objects back to "YYYY-MM-DD" strings for Google Sheets.
-                    def _fmt_date(d):
-                        try:
-                            return d.strftime("%Y-%m-%d") if isinstance(d, date) else ""
-                        except AttributeError:
-                            return ""
-                    clean_save_df['Start Date'] = clean_save_df['Start Date'].apply(_fmt_date)
+                    # Normalize Start Date strings to YYYY-MM-DD for Google Sheets.
+                    clean_save_df['Start Date'] = clean_save_df['Start Date'].apply(
+                        lambda s: scheduler.normalize_date_string(str(s).strip()) or ""
+                        if str(s).strip() not in ("", "nan", "None") else ""
+                    )
                     # Ensure numeric columns are stored as plain strings (no .0 suffix on integers).
                     for _col in ('Min Hours', 'Max Hours'):
                         clean_save_df[_col] = clean_save_df[_col].apply(
@@ -1337,18 +1331,11 @@ with tab6:
     holiday_display_cols = ['Date', 'Name', 'Override Type']
     display_holidays_df = holidays_df_raw[holiday_display_cols].copy()
 
-    def _parse_holiday_date(s):
-        if not s or str(s).strip() in ("", "nan", "None"):
-            return None
-        normalized = scheduler.normalize_date_string(str(s).strip())
-        if not normalized:
-            return None
-        try:
-            return datetime.strptime(normalized, "%Y-%m-%d").date()
-        except ValueError:
-            return None
-
-    display_holidays_df['Date'] = display_holidays_df['Date'].apply(_parse_holiday_date)
+    # Normalize Date to YYYY-MM-DD for display; empty/unparseable stays blank.
+    display_holidays_df['Date'] = display_holidays_df['Date'].apply(
+        lambda s: scheduler.normalize_date_string(str(s).strip()) or ""
+        if str(s).strip() not in ("", "nan", "None") else ""
+    )
     display_holidays_df['Override Type'] = display_holidays_df['Override Type'].apply(
         lambda v: "" if str(v).strip().lower() in ("nan", "none") else str(v).strip()
     )
@@ -1420,7 +1407,7 @@ with tab6:
         hide_index=True,
         num_rows="dynamic",
         column_config={
-            "Date": st.column_config.DateColumn("Date", format="YYYY-MM-DD", required=True),
+            "Date": st.column_config.TextColumn("Date", help="e.g. 2026-07-04 or 7/4/2026", required=True),
             "Name": st.column_config.TextColumn("Name", help="e.g. 'Christmas', 'Thanksgiving'", required=True),
             "Override Type": st.column_config.SelectboxColumn("Override Type", options=holiday_override_options,
                 help="Blank = day-of-week default. 'Closed' = skip. Any Shift Template Day Type = use that schedule."),
@@ -1436,13 +1423,17 @@ with tab6:
             h_name = str(row.get('Name') or "").strip()
             h_override = str(row.get('Override Type') or "").strip()
 
-            if not h_date:
+            if not h_date or str(h_date).strip() in ("", "nan", "None"):
                 holiday_errors.append(f"Row {idx + 1}: Date cannot be blank.")
+                continue
+            normalized_h_date = scheduler.normalize_date_string(str(h_date).strip())
+            if not normalized_h_date:
+                holiday_errors.append(f"Row {idx + 1}: Date '{h_date}' is not a recognizable date. Use a format like 2026-07-04 or 7/4/2026.")
                 continue
             if not h_name:
                 holiday_errors.append(f"Row {idx + 1}: Name cannot be blank.")
 
-            date_key = str(h_date)
+            date_key = normalized_h_date
             if date_key in seen_dates:
                 holiday_errors.append(f"Duplicate date: **{date_key}** — each date can only appear once.")
             seen_dates.add(date_key)
@@ -1458,13 +1449,14 @@ with tab6:
         if save_h_col.button("💾 Save Holiday Changes to Google Sheet", type="primary", use_container_width=True, key="save_holidays_btn", disabled=bool(holiday_errors)):
             with st.spinner("Saving holidays to Google Sheets..."):
                 try:
-                    def _fmt_holiday_date(d):
-                        try:
-                            return d.strftime("%Y-%m-%d") if isinstance(d, date) else ""
-                        except AttributeError:
-                            return ""
-                    clean_holidays_df = edited_holidays.dropna(subset=["Date"]).copy()
-                    clean_holidays_df['Date'] = clean_holidays_df['Date'].apply(_fmt_holiday_date)
+                    clean_holidays_df = edited_holidays.copy()
+                    clean_holidays_df = clean_holidays_df[
+                        clean_holidays_df['Date'].apply(lambda s: bool(str(s).strip()) and str(s).strip() not in ("nan", "None"))
+                    ]
+                    # Normalize date strings to YYYY-MM-DD for Google Sheets.
+                    clean_holidays_df['Date'] = clean_holidays_df['Date'].apply(
+                        lambda s: scheduler.normalize_date_string(str(s).strip()) or ""
+                    )
                     clean_holidays_df = clean_holidays_df[clean_holidays_df['Date'] != ""]
                     # Load fresh sheet data: detect concurrent changes, and use as accurate "before" state for history.
                     _, _, fresh_holidays_df = scheduler.load_tab_data()
