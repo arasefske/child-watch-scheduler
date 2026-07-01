@@ -678,9 +678,9 @@ emp_names_for_dropdown = (
     else [""]
 )
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "📊 Table Editor View", "📅 Calendar Grid View",
-    audit_tab_label, "👥 Employee List", history_tab_label
+    audit_tab_label, "👥 Employee List", "📋 Shift Templates", history_tab_label
 ])
 
 with tab1:
@@ -1149,6 +1149,135 @@ with tab4:
                 st.error(f"Failed to apply validation rules: {e}")
 
 with tab5:
+    st.write("Add, edit, or remove shift templates. Changes take effect the next time you run Auto-Assign or Initialize Blanks.")
+    st.caption("Each row is one shift slot per day. Set **Staff Required** ≥ 1 to generate multiple open slots for the same shift.")
+
+    tmpl_df_raw, _, _ = cached_load_tab_data()
+    template_cols = ['Day Type', 'Start Time', 'End Time', 'Staff Required']
+    display_tmpl_df = tmpl_df_raw[template_cols].copy()
+    # Coerce Staff Required to int so the NumberColumn renders correctly.
+    display_tmpl_df['Staff Required'] = pd.to_numeric(display_tmpl_df['Staff Required'], errors='coerce').astype('Int64')
+
+    if "template_data_hash" not in st.session_state:
+        st.session_state["template_data_hash"] = None
+    if "template_last_synced" not in st.session_state:
+        st.session_state["template_last_synced"] = None
+    if "template_external_change" not in st.session_state:
+        st.session_state["template_external_change"] = False
+
+    current_tmpl_hash = hash(display_tmpl_df.to_csv(index=False))
+    if st.session_state["template_data_hash"] is None:
+        st.session_state["template_data_hash"] = current_tmpl_hash
+        st.session_state["template_last_synced"] = datetime.now()
+    elif current_tmpl_hash != st.session_state["template_data_hash"]:
+        st.session_state["template_data_hash"] = current_tmpl_hash
+        st.session_state["template_last_synced"] = datetime.now()
+        st.session_state["template_external_change"] = True
+
+    if st.session_state["template_external_change"]:
+        tmpl_banner_col, tmpl_dismiss_col = st.columns([5, 1])
+        with tmpl_banner_col:
+            st.warning("⚠️ Shift Templates were changed outside this app. The table below already reflects the latest data.")
+        with tmpl_dismiss_col:
+            st.write("")
+            if st.button("Dismiss", key="dismiss_tmpl_change"):
+                st.session_state["template_external_change"] = False
+                st.rerun()
+
+    tmpl_sync_col, tmpl_refresh_col = st.columns([5, 1])
+    with tmpl_sync_col:
+        if st.session_state["template_last_synced"]:
+            elapsed = int((datetime.now() - st.session_state["template_last_synced"]).total_seconds())
+            if elapsed < 60:
+                tmpl_sync_label = "just now"
+            elif elapsed < 3600:
+                m = elapsed // 60
+                tmpl_sync_label = f"{m} minute{'s' if m != 1 else ''} ago"
+            else:
+                h = elapsed // 3600
+                tmpl_sync_label = f"{h} hour{'s' if h != 1 else ''} ago"
+            st.caption(f"Last synced from Google Sheets: {tmpl_sync_label}")
+    with tmpl_refresh_col:
+        if st.button("🔄 Refresh", use_container_width=True, key="refresh_templates_btn"):
+            st.cache_data.clear()
+            st.session_state["template_data_hash"] = None
+            st.session_state["template_last_synced"] = None
+            st.session_state["template_external_change"] = False
+            st.rerun()
+
+    template_editor_key = "template_list_editor"
+    edited_templates = st.data_editor(
+        display_tmpl_df,
+        use_container_width=True,
+        hide_index=True,
+        num_rows="dynamic",
+        column_config={
+            "Day Type": st.column_config.SelectboxColumn("Day Type", options=["Weekday", "Saturday"], required=True),
+            "Start Time": st.column_config.TextColumn("Start Time", help="e.g. '9:00 AM' or '14:00'", required=True),
+            "End Time": st.column_config.TextColumn("End Time", help="e.g. '1:00 PM' or '17:00'", required=True),
+            "Staff Required": st.column_config.NumberColumn("Staff Required", min_value=1, step=1, format="%d"),
+        },
+        key=template_editor_key,
+    )
+
+    if not edited_templates.equals(display_tmpl_df):
+        tmpl_errors = []
+        seen_slots = set()
+        for idx, row in edited_templates.iterrows():
+            day_type = str(row.get('Day Type') or "").strip()
+            start = str(row.get('Start Time') or "").strip()
+            end = str(row.get('End Time') or "").strip()
+            staff = row.get('Staff Required')
+
+            if not day_type:
+                tmpl_errors.append(f"Row {idx + 1}: Day Type cannot be blank.")
+            if not start:
+                tmpl_errors.append(f"Row {idx + 1}: Start Time cannot be blank.")
+            if not end:
+                tmpl_errors.append(f"Row {idx + 1}: End Time cannot be blank.")
+
+            if start and end:
+                hours = scheduler.calculate_hours(start, end)
+                if hours == 0.0:
+                    tmpl_errors.append(f"Row {idx + 1} ({day_type}): Start Time '{start}' or End Time '{end}' could not be parsed — use a format like '9:00 AM' or '14:00'.")
+
+            if day_type and start:
+                slot_key = (day_type.lower(), start.lower())
+                if slot_key in seen_slots:
+                    tmpl_errors.append(f"Duplicate slot: **{day_type}** at **{start}** — each Day Type + Start Time combination must be unique.")
+                seen_slots.add(slot_key)
+
+            if pd.notna(staff):
+                try:
+                    if int(staff) < 1:
+                        tmpl_errors.append(f"Row {idx + 1} ({day_type} {start}): Staff Required must be at least 1.")
+                except (ValueError, TypeError):
+                    tmpl_errors.append(f"Row {idx + 1}: Staff Required must be a whole number.")
+
+        if tmpl_errors:
+            for err in tmpl_errors:
+                st.error(err)
+
+        save_tmpl_col, revert_tmpl_col = st.columns(2)
+        if save_tmpl_col.button("💾 Save Template Changes to Google Sheet", type="primary", use_container_width=True, key="save_templates_btn", disabled=bool(tmpl_errors)):
+            with st.spinner("Saving shift templates to Google Sheets..."):
+                try:
+                    clean_tmpl_df = edited_templates.dropna(subset=["Day Type"]).copy()
+                    clean_tmpl_df = clean_tmpl_df[clean_tmpl_df["Day Type"].astype(str).str.strip() != ""]
+                    scheduler.write_templates_to_sheet(clean_tmpl_df)
+                    st.cache_data.clear()
+                    st.session_state["template_data_hash"] = None
+                    st.session_state["template_last_synced"] = None
+                    st.session_state["template_external_change"] = False
+                    st.success("Shift templates saved to Google Sheets!")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Failed to save shift templates: {e}")
+        if revert_tmpl_col.button("↩️ Revert Changes", type="secondary", use_container_width=True, key="revert_templates_btn"):
+            del st.session_state[template_editor_key]
+            st.rerun()
+
+with tab6:
     if working_df is not None and not working_df.empty:
         st.write("Every change made to the Assignments sheet — through this app or directly in Google Sheets.")
         try:

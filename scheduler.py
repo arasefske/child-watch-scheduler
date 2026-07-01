@@ -593,6 +593,26 @@ def load_tab_data():
     holiday_cols = ['Date', 'Day of Week', 'Day Type', 'Name', 'Override Type']
     return fetch_clean_dataframe("Employees", employee_cols), fetch_clean_dataframe("Shift Templates", template_cols), fetch_clean_dataframe("Holidays", holiday_cols)
 
+def write_templates_to_sheet(templates_df):
+    """Overwrites the Shift Templates sheet with the provided dataframe."""
+    template_cols = ['Day Type', 'Start Time', 'End Time', 'Staff Required']
+    sheet = workbook.worksheet("Shift Templates")
+    sheet.clear()
+    rows = [template_cols]
+    for _, row in templates_df.iterrows():
+        staff_val = row.get('Staff Required', '')
+        try:
+            staff_val = int(float(staff_val)) if str(staff_val).strip() not in ('', 'nan', 'None') else ''
+        except (ValueError, TypeError):
+            staff_val = ''
+        rows.append([
+            str(row.get('Day Type', '')).strip(),
+            str(row.get('Start Time', '')).strip(),
+            str(row.get('End Time', '')).strip(),
+            staff_val,
+        ])
+    sheet.update(range_name='A1', values=rows, value_input_option="USER_ENTERED")
+
 def write_employees_to_sheet(employees_df):
     """Overwrites the Employees sheet with the provided dataframe. Clears existing content first."""
     employee_cols = ['Employee Name', 'Status', 'Default Rules', 'Blocked Dates', 'Min Hours', 'Max Hours', 'Start Date']
