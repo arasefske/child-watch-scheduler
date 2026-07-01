@@ -1424,7 +1424,8 @@ with tab6:
         for idx, row in edited_holidays.iterrows():
             h_date = row.get('Date')
             h_name = str(row.get('Name') or "").strip()
-            h_override = str(row.get('Override Type') or "").strip()
+            h_override_raw = row.get('Override Type')
+            h_override = "" if (h_override_raw is None or str(h_override_raw).strip().lower() in ("", "nan", "none")) else str(h_override_raw).strip()
 
             if not h_date or str(h_date).strip() in ("", "nan", "None"):
                 holiday_errors.append(f"Row {idx + 1}: Date cannot be blank.")
