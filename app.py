@@ -184,8 +184,8 @@ with col1:
     with st.container(border=True):
         st.markdown("#### 🧱 Step 1 — Initialization")
         st.caption("Generate empty template shifts for the month. This clears out previous iterations for this month.")
-        if st.button("Initialize Blank Slots", type="secondary", use_container_width=True):
-            capture_undo_snapshot("Initialize Blank Slots")
+        if st.button("Initialize Month", type="secondary", use_container_width=True):
+            capture_undo_snapshot("Initialize Month")
             with st.spinner("Connecting to Google Sheets and building matrix..."):
                 try:
                     scheduler.run_initialize_blanks(selected_year, selected_month)
@@ -195,7 +195,7 @@ with col1:
                     st.rerun()
                 except Exception as e:
                     st.error(f"Initialization failed: {e}")
-        render_inline_undo("Initialize Blank Slots")
+        render_inline_undo("Initialize Month")
 
 with col2:
     with st.container(border=True):
@@ -1167,7 +1167,7 @@ with tab4:
                 st.error(f"Failed to apply validation rules: {e}")
 
 with tab5:
-    st.write("Add, edit, or remove shift templates. Changes take effect the next time you run Auto-Assign or Initialize Blanks.")
+    st.write("Add, edit, or remove shift templates. Changes take effect the next time you run Auto-Assign or Initialize Month.")
     st.caption("Each row is one shift slot per day. Set **Staff Required** ≥ 1 to generate multiple open slots for the same shift.")
 
     _, tmpl_df_raw, _ = cached_load_tab_data()
