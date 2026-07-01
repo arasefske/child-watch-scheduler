@@ -37,6 +37,18 @@ def cached_normalize_rules(year, month, _active_employees):
     tab doesn't re-trigger Claude calls on every rerun."""
     return scheduler.batch_normalize_rules_with_claude(_active_employees, year, month)
 
+@st.cache_data(ttl=30)
+def cached_fetch_history():
+    """Short-lived cache so the History tab and direct-edit badge don't hit Google Sheets
+    on every page rerun (toggle clicks, button presses, etc.)."""
+    return scheduler.fetch_history()
+
+@st.cache_data(ttl=30)
+def cached_get_app_state(key, default=""):
+    """Short-lived cache for the App State sheet so notification markers don't require a
+    live read on every rerun."""
+    return scheduler.get_app_state(key, default)
+
 st.title("🗓️ Child Watch Scheduler Dashboard")
 st.write("Manage your Google Sheet schedule matrix and run the optimization engine locally.")
 
@@ -657,8 +669,8 @@ if working_df is not None and not working_df.empty:
     # marker is persisted in the sheet itself (not session state) so the badge doesn't reappear
     # just because the Streamlit process restarted, and tracks the latest seen *timestamp*
     # (not a raw count) so deleting History rows can't cause a later genuine edit to go unnoticed.
-    history_df_preview = scheduler.fetch_history()
-    last_seen_direct_edit_ts = scheduler.get_app_state("last_seen_direct_edit_timestamp", "")
+    history_df_preview = cached_fetch_history()
+    last_seen_direct_edit_ts = cached_get_app_state("last_seen_direct_edit_timestamp", "")
     unseen_direct_edits, latest_direct_edit_ts = scheduler.count_unseen_direct_edits(history_df_preview, last_seen_direct_edit_ts)
 
     if unseen_direct_edits > 0:
@@ -1494,6 +1506,8 @@ with tab7:
             if unseen_direct_edits > 0:
                 if st.button(f"🔔 Mark {unseen_direct_edits} direct edit notification(s) as read", type="secondary"):
                     scheduler.set_app_state("last_seen_direct_edit_timestamp", latest_direct_edit_ts)
+                    cached_fetch_history.clear()
+                    cached_get_app_state.clear()
                     st.rerun()
             if history_df.empty:
                 st.info("No history recorded yet. Changes will start appearing here once you run an action that edits the schedule.")
