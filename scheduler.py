@@ -552,13 +552,19 @@ def build_empty_schedule_matrix(target_year, target_month, templates_df=None, ho
     start_date = datetime(target_year, target_month, 1)
     end_date = datetime(target_year + 1, 1, 1) if target_month == 12 else datetime(target_year, target_month + 1, 1)
     
-    # Pre-index holidays as a dict for O(1) daily lookup instead of O(n) DataFrame scan
+    # Pre-index holidays as a dict for O(1) daily lookup. Dates are normalized to
+    # YYYY-MM-DD so entries like "7/3/2026" or "July 3, 2026" still match the
+    # strftime-produced date_str regardless of how the sheet stores them.
     holiday_map = {}
     if not holidays_df.empty and 'Date' in holidays_df.columns:
-        holiday_map = dict(zip(holidays_df['Date'].astype(str), holidays_df['Override Type'].astype(str)))
+        for _, h_row in holidays_df.iterrows():
+            normalized_date = normalize_date_string(str(h_row.get('Date', '')))
+            if normalized_date:
+                holiday_map[normalized_date] = str(h_row.get('Override Type', '')).strip()
 
-    # All known Day Types in the templates — used to validate custom Override Types.
-    template_day_types = set(templates_df['Day Type'].dropna().astype(str).str.strip().unique())
+    # Case-insensitive lookup: lower-case Day Type → original casing from the sheet.
+    # Lets "fourth of july" in Override Type match a template named "Fourth of July".
+    template_day_types_ci = {t.lower(): t for t in templates_df['Day Type'].dropna().astype(str).str.strip().unique()}
 
     new_assignments = []
     current = start_date
@@ -582,10 +588,10 @@ def build_empty_schedule_matrix(target_year, target_month, templates_df=None, ho
         #   Any Day Type present in Shift Templates → use that template directly
         #   Unknown value → fall back to day-of-week default with a warning
         if override_type is not None:
-            if override_type == "Saturday Template":
+            if override_type.lower() == "saturday template":
                 active_day_type = "Saturday"
-            elif override_type in template_day_types:
-                active_day_type = override_type
+            elif override_type.lower() in template_day_types_ci:
+                active_day_type = template_day_types_ci[override_type.lower()]
             else:
                 print(f"[WARN] Holiday on {date_str} has Override Type '{override_type}' which doesn't match any Shift Template Day Type. Falling back to day-of-week default.")
                 active_day_type = "Saturday" if day_of_week == "Saturday" else "Weekday"
