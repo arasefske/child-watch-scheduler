@@ -47,16 +47,6 @@ month_names = [
     "July", "August", "September", "October", "November", "December"
 ]
 
-toolbar_year, toolbar_month, toolbar_refresh = st.columns([1, 2, 1])
-with toolbar_year:
-    selected_year = st.number_input("Target Year", min_value=2025, max_value=2035, value=2026)
-with toolbar_month:
-    selected_month_name = st.selectbox("Target Month", month_names, index=6, width=200)
-    selected_month = month_names.index(selected_month_name) + 1
-with toolbar_refresh:
-    st.write("")
-    force_refresh_clicked = st.button("🔄 Force Refresh From Cloud", use_container_width=True)
-
 # Session State Initialization
 if "schedule_df" not in st.session_state:
     st.session_state["schedule_df"] = None
@@ -89,7 +79,6 @@ if "employee_external_change" not in st.session_state:
 if "employee_snapshot_csv" not in st.session_state:
     st.session_state["employee_snapshot_csv"] = None
 
-active_key = f"{selected_year}-{selected_month}"
 fallback_cols = ["Date", "Day of Week", "Day Type", "Start Time", "End Time", "Assigned Employee", "Issues"]
 
 # Helper: Snapshot current state before mutation
@@ -128,19 +117,7 @@ def render_inline_undo(action_names):
             except Exception as e:
                 st.error(f"Failed to restore state: {e}")
 
-# Manual Sync (Clears data caches globally)
-if force_refresh_clicked:
-    st.session_state["schedule_df"] = None
-    st.session_state["last_error"] = None
-    st.session_state["history_df"] = None
-    st.session_state["employee_data_hash"] = None
-    st.session_state["employee_last_synced"] = None
-    st.session_state["employee_external_change"] = False
-    st.cache_data.clear()
-    st.rerun()
-
 # 2. Main Dashboard Interface Layout
-st.subheader(f"Operations for {selected_month_name} {selected_year}")
 
 # Fatal Error Alerts
 if st.session_state["last_error"]:
@@ -178,52 +155,78 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-col1, col2 = st.columns(2)
+with st.container(border=True):
+    ctrl_year, ctrl_month, ctrl_refresh = st.columns([1, 1, 1])
+    with ctrl_year:
+        selected_year = st.number_input("Target Year", min_value=2025, max_value=2035, value=2026)
+    with ctrl_month:
+        selected_month_name = st.selectbox("Target Month", month_names, index=6)
+        selected_month = month_names.index(selected_month_name) + 1
+    with ctrl_refresh:
+        st.write("")
+        force_refresh_clicked = st.button("🔄 Force Refresh From Cloud", use_container_width=True)
 
-with col1:
-    with st.container(border=True):
-        st.markdown("#### 🧱 Step 1 — Initialization")
-        st.caption("Generate empty template shifts for the month. This clears out previous iterations for this month.")
-        if st.button("Initialize Month", type="secondary", use_container_width=True):
-            capture_undo_snapshot("Initialize Month")
-            with st.spinner("Connecting to Google Sheets and building matrix..."):
-                try:
-                    scheduler.run_initialize_blanks(selected_year, selected_month)
-                    st.success(f"Successfully initialized blank slots for {selected_month_name} {selected_year}!")
-                    st.session_state["schedule_df"] = None
-                    st.session_state["last_error"] = None
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Initialization failed: {e}")
-        render_inline_undo("Initialize Month")
+    st.divider()
 
-with col2:
-    with st.container(border=True):
-        st.markdown("#### 🤖 Step 2 — Roster Allocation")
-        st.caption("Run the workload-balanced allocation rules over unassigned slots.")
+    col1, col2 = st.columns(2)
 
-        overwrite_mode = st.checkbox("Force Overwrite", help="Wipe all manual edits in the sheet and reassign from scratch.")
+    with col1:
+        with st.container(border=True):
+            st.markdown("#### 🧱 Step 1 — Initialization")
+            st.caption("Generate empty template shifts for the month. This clears out previous iterations for this month.")
+            if st.button("Initialize Month", type="secondary", use_container_width=True):
+                capture_undo_snapshot("Initialize Month")
+                with st.spinner("Connecting to Google Sheets and building matrix..."):
+                    try:
+                        scheduler.run_initialize_blanks(selected_year, selected_month)
+                        st.success(f"Successfully initialized blank slots for {selected_month_name} {selected_year}!")
+                        st.session_state["schedule_df"] = None
+                        st.session_state["last_error"] = None
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Initialization failed: {e}")
+            render_inline_undo("Initialize Month")
 
-        button_label = "Force Overwrite & Reassign" if overwrite_mode else "Auto-Assign Roster (Smart Fill)"
-        button_type = "primary" if overwrite_mode else "secondary"
+    with col2:
+        with st.container(border=True):
+            st.markdown("#### 🤖 Step 2 — Roster Allocation")
+            st.caption("Run the workload-balanced allocation rules over unassigned slots.")
 
-        if st.button(button_label, type=button_type, use_container_width=True):
-            capture_undo_snapshot(button_label)
-            with st.status("📡 Contacting Claude and building the roster — this can take up to a minute...", expanded=True) as status:
-                log_placeholder = st.empty()
-                try:
-                    with st_capture(log_placeholder):
-                        scheduler.run_auto_assignment(selected_year, selected_month, overwrite=overwrite_mode)
-                    status.update(label="✅ Roster generation complete!", state="complete", expanded=False)
-                    st.success(f"Roster generation complete for {selected_month_name} {selected_year}!")
-                    st.session_state["schedule_df"] = None
-                    st.session_state["last_error"] = None
-                    st.rerun()
-                except Exception as e:
-                    status.update(label="🛑 Assignment execution failed", state="error", expanded=True)
-                    st.session_state["last_error"] = str(e)
-                    st.error(f"Assignment execution failed: {e}")
-        render_inline_undo(["Force Overwrite & Reassign", "Auto-Assign Roster (Smart Fill)"])
+            overwrite_mode = st.checkbox("Force Overwrite", help="Wipe all manual edits in the sheet and reassign from scratch.")
+
+            button_label = "Force Overwrite & Reassign" if overwrite_mode else "Auto-Assign Roster (Smart Fill)"
+            button_type = "primary" if overwrite_mode else "secondary"
+
+            if st.button(button_label, type=button_type, use_container_width=True):
+                capture_undo_snapshot(button_label)
+                with st.status("📡 Contacting Claude and building the roster — this can take up to a minute...", expanded=True) as status:
+                    log_placeholder = st.empty()
+                    try:
+                        with st_capture(log_placeholder):
+                            scheduler.run_auto_assignment(selected_year, selected_month, overwrite=overwrite_mode)
+                        status.update(label="✅ Roster generation complete!", state="complete", expanded=False)
+                        st.success(f"Roster generation complete for {selected_month_name} {selected_year}!")
+                        st.session_state["schedule_df"] = None
+                        st.session_state["last_error"] = None
+                        st.rerun()
+                    except Exception as e:
+                        status.update(label="🛑 Assignment execution failed", state="error", expanded=True)
+                        st.session_state["last_error"] = str(e)
+                        st.error(f"Assignment execution failed: {e}")
+            render_inline_undo(["Force Overwrite & Reassign", "Auto-Assign Roster (Smart Fill)"])
+
+active_key = f"{selected_year}-{selected_month}"
+
+# Manual Sync (Clears data caches globally)
+if force_refresh_clicked:
+    st.session_state["schedule_df"] = None
+    st.session_state["last_error"] = None
+    st.session_state["history_df"] = None
+    st.session_state["employee_data_hash"] = None
+    st.session_state["employee_last_synced"] = None
+    st.session_state["employee_external_change"] = False
+    st.cache_data.clear()
+    st.rerun()
 
 # 3. Onboard New Hire — for an employee who started after this month's schedule was already
 # built. Neither Auto-Assign mode fits this: Smart Fill only ever touches empty gaps (useless
