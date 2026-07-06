@@ -10,6 +10,10 @@ if errorlevel 1 (
     exit /b 1
 )
 
+echo Checking for updates...
+git pull
+echo.
+
 echo Starting Child Watch Scheduler...
 docker-compose up --build -d
 
