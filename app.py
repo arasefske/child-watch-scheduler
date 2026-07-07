@@ -51,6 +51,7 @@ def cached_get_app_state(key, default=""):
 
 st.title("🗓️ Child Watch Scheduler Dashboard")
 st.write("Manage your Google Sheet schedule matrix and run the optimization engine locally.")
+st.caption("🟢 Connected to: **Child Watch Schedule**")
 
 # 1. Date Selection Toolbar (kept on the main page — the sidebar is reserved exclusively
 # for the Natural Language Command Assistant)
@@ -90,6 +91,8 @@ if "employee_external_change" not in st.session_state:
     st.session_state["employee_external_change"] = False
 if "employee_snapshot_csv" not in st.session_state:
     st.session_state["employee_snapshot_csv"] = None
+if "confirm_initialize" not in st.session_state:
+    st.session_state["confirm_initialize"] = False
 
 fallback_cols = ["Date", "Day of Week", "Day Type", "Start Time", "End Time", "Assigned Employee", "Issues"]
 
@@ -168,7 +171,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 with st.container(border=True):
-    ctrl_year, ctrl_month, ctrl_refresh = st.columns([1, 1, 1])
+    ctrl_year, ctrl_month, ctrl_refresh = st.columns([3, 3, 2])
     with ctrl_year:
         selected_year = st.number_input("Target Year", min_value=2025, max_value=2035, value=2026)
     with ctrl_month:
@@ -185,18 +188,29 @@ with st.container(border=True):
     with col1:
         with st.container(border=True):
             st.markdown("#### 🧱 Step 1 — Initialization")
-            st.caption("Generate empty template shifts for the month. This clears out previous iterations for this month.")
-            if st.button("Initialize Month", type="secondary", use_container_width=True):
-                capture_undo_snapshot("Initialize Month")
-                with st.spinner("Connecting to Google Sheets and building matrix..."):
-                    try:
-                        scheduler.run_initialize_blanks(selected_year, selected_month)
-                        st.success(f"Successfully initialized blank slots for {selected_month_name} {selected_year}!")
-                        st.session_state["schedule_df"] = None
-                        st.session_state["last_error"] = None
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Initialization failed: {e}")
+            if not st.session_state["confirm_initialize"]:
+                st.caption("Generate empty template shifts for the month. This clears out previous iterations for this month.")
+                if st.button("Initialize Month", type="secondary", use_container_width=True):
+                    st.session_state["confirm_initialize"] = True
+                    st.rerun()
+            else:
+                st.warning(f"⚠️ This will **clear all existing shifts** for {selected_month_name} {selected_year}. This cannot be undone automatically. Continue?")
+                confirm_init_col, cancel_init_col = st.columns(2)
+                if confirm_init_col.button("✅ Yes, Initialize", type="primary", use_container_width=True):
+                    st.session_state["confirm_initialize"] = False
+                    capture_undo_snapshot("Initialize Month")
+                    with st.spinner("Connecting to Google Sheets and building matrix..."):
+                        try:
+                            scheduler.run_initialize_blanks(selected_year, selected_month)
+                            st.success(f"Successfully initialized blank slots for {selected_month_name} {selected_year}!")
+                            st.session_state["schedule_df"] = None
+                            st.session_state["last_error"] = None
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Initialization failed: {e}")
+                if cancel_init_col.button("Cancel", type="secondary", use_container_width=True):
+                    st.session_state["confirm_initialize"] = False
+                    st.rerun()
             render_inline_undo("Initialize Month")
 
     with col2:
@@ -247,8 +261,7 @@ if force_refresh_clicked:
 # currently held by employees who've already met their own Min Hours, and lets the user hand
 # them over one at a time, reviewing each before it's written.
 st.divider()
-with st.container(border=True):
-    st.markdown("#### 🆕 Onboard New Hire — Reassign Existing Shifts")
+with st.expander("🆕 Onboard New Hire — Reassign Existing Shifts", expanded=False):
     st.caption(
         "For an employee who started after this month's schedule was already built. Surfaces shifts "
         "(from today onward) currently held by employees who've already met their Min Hours, so you can "
@@ -296,41 +309,57 @@ with st.container(border=True):
                 st.info(f"No eligible shifts found to reassign to {new_hire_name} for the rest of this month.")
             else:
                 st.write(f"**{len(shifts)} candidate shift(s)** for {new_hire_name} — each is currently held by someone who would still meet their own Min Hours if it were reassigned:")
-                for i, shift in enumerate(shifts):
-                    shift_col, assign_col = st.columns([3, 1])
-                    with shift_col:
-                        st.write(
-                            f"{shift['date']} ({shift['day_of_week']}) @ {shift['start_time']}–{shift['end_time']} "
-                            f"— currently **{shift['current_employee']}** "
-                            f"(would have {shift['donor_hours_after']:.1f} hrs left, min {shift['donor_min_hours']:.1f})"
-                        )
-                    with assign_col:
-                        if st.button(f"➕ Assign to {new_hire_name}", key=f"assign_hire_{i}", use_container_width=True):
-                            capture_undo_snapshot("New Hire Shift Assignment")
-                            with st.spinner("Reassigning shift..."):
-                                try:
-                                    scheduler.apply_chat_deltas(
-                                        [{
-                                            "date": shift["date"], "start_time": shift["start_time"],
-                                            "original_employee": shift["current_employee"], "new_employee": new_hire_name,
-                                        }],
-                                        instruction=f"Onboarding new hire: {new_hire_name}",
-                                        method="New Hire Shift Assignment",
+
+                # Group by week then by day so 100+ shifts don't become one giant scroll.
+                from collections import defaultdict
+                _shifts_by_week = defaultdict(lambda: defaultdict(list))
+                for _i, _s in enumerate(shifts):
+                    _d = datetime.strptime(_s['date'], '%Y-%m-%d')
+                    _days_to_sun = (_d.weekday() + 1) % 7
+                    _week_start = (_d - timedelta(days=_days_to_sun)).strftime('%Y-%m-%d')
+                    _shifts_by_week[_week_start][_s['date']].append((_i, _s))
+
+                for _week_start in sorted(_shifts_by_week.keys()):
+                    _days = _shifts_by_week[_week_start]
+                    _week_total = sum(len(v) for v in _days.values())
+                    _ws_dt = datetime.strptime(_week_start, '%Y-%m-%d')
+                    _we_dt = _ws_dt + timedelta(days=6)
+                    _week_label = f"{_ws_dt.strftime('%b %-d')} – {_we_dt.strftime('%b %-d')}  ({_week_total} shift{'s' if _week_total != 1 else ''})"
+                    with st.expander(_week_label, expanded=False):
+                        for _day_str in sorted(_days.keys()):
+                            _day_dt = datetime.strptime(_day_str, '%Y-%m-%d')
+                            st.markdown(f"**{_day_dt.strftime('%A, %b %-d')}**")
+                            for i, shift in _days[_day_str]:
+                                shift_col, assign_col = st.columns([3, 1])
+                                with shift_col:
+                                    st.write(
+                                        f"{shift['start_time']}–{shift['end_time']} "
+                                        f"— currently **{shift['current_employee']}** "
+                                        f"(would have {shift['donor_hours_after']:.1f} hrs left, min {shift['donor_min_hours']:.1f})"
                                     )
-                                    st.session_state["schedule_df"] = None
-                                    # Refresh the candidate list in place so it reflects the new state —
-                                    # the assigned shift drops out, and other candidates' numbers update.
-                                    # (cached_normalize_rules is @st.cache_data'd, so this is a cheap
-                                    # lookup here, not a fresh Claude call.)
-                                    refreshed_rules_map = cached_normalize_rules(selected_year, selected_month, onboard_active_employees)
-                                    st.session_state["new_hire_candidates"] = {
-                                        "name": new_hire_name,
-                                        "shifts": scheduler.find_new_hire_candidate_shifts(selected_year, selected_month, new_hire_name, refreshed_rules_map),
-                                    }
-                                    st.success(f"Assigned the {shift['date']} {shift['start_time']} shift to {new_hire_name}!")
-                                    st.rerun()
-                                except Exception as e:
-                                    st.error(f"Failed to reassign shift: {e}")
+                                with assign_col:
+                                    if st.button("➕ Assign", key=f"assign_hire_{i}", use_container_width=True):
+                                        capture_undo_snapshot("New Hire Shift Assignment")
+                                        with st.spinner("Reassigning shift..."):
+                                            try:
+                                                scheduler.apply_chat_deltas(
+                                                    [{
+                                                        "date": shift["date"], "start_time": shift["start_time"],
+                                                        "original_employee": shift["current_employee"], "new_employee": new_hire_name,
+                                                    }],
+                                                    instruction=f"Onboarding new hire: {new_hire_name}",
+                                                    method="New Hire Shift Assignment",
+                                                )
+                                                st.session_state["schedule_df"] = None
+                                                refreshed_rules_map = cached_normalize_rules(selected_year, selected_month, onboard_active_employees)
+                                                st.session_state["new_hire_candidates"] = {
+                                                    "name": new_hire_name,
+                                                    "shifts": scheduler.find_new_hire_candidate_shifts(selected_year, selected_month, new_hire_name, refreshed_rules_map),
+                                                }
+                                                st.success(f"Assigned the {shift['date']} {shift['start_time']} shift to {new_hire_name}!")
+                                                st.rerun()
+                                            except Exception as e:
+                                                st.error(f"Failed to reassign shift: {e}")
                 if st.button("✖ Clear candidate list"):
                     st.session_state["new_hire_candidates"] = None
                     st.rerun()
@@ -342,7 +371,7 @@ st.sidebar.divider()
 st.sidebar.subheader("💬 Natural Language Command Assistant")
 st.sidebar.write("Type modifications conversationally (e.g., *'Swap Alice and Bob's shifts on July 1 and 2'*).")
 
-with st.sidebar.form("chat_assistant_form", clear_on_submit=False):
+with st.sidebar.form("chat_assistant_form", clear_on_submit=True):
     chat_instruction = st.text_area(
         "Enter scheduling instructions:",
         placeholder="Alice is out sick on July 10, remove her from all shifts...",
@@ -436,7 +465,7 @@ if st.session_state["schedule_df"] is None or st.session_state["current_view_key
 working_df = st.session_state["schedule_df"]
 
 # --- HTML Calendar Grid Generation Engine ---
-def render_html_calendar_grid(year, month, data_frame):
+def render_html_calendar_grid(year, month, data_frame, holidays_df=None):
     shifts_by_date = {}
     for _, row in data_frame.iterrows():
         d_str = str(row['Date'])
@@ -444,7 +473,17 @@ def render_html_calendar_grid(year, month, data_frame):
             shifts_by_date[d_str] = []
         shifts_by_date[d_str].append(row)
 
-    cal = calendar.Calendar(firstweekday=6) 
+    holiday_lookup = {}
+    if holidays_df is not None and not holidays_df.empty:
+        for _, h in holidays_df.iterrows():
+            h_date = scheduler.normalize_date_string(str(h.get('Date', '')))
+            if h_date:
+                holiday_lookup[h_date] = {
+                    "name": str(h.get('Name', '')),
+                    "override": str(h.get('Override Type', '')).strip().lower()
+                }
+
+    cal = calendar.Calendar(firstweekday=6)
     month_weeks = cal.monthdayscalendar(year, month)
 
     html = """
@@ -452,10 +491,15 @@ def render_html_calendar_grid(year, month, data_frame):
         .cal-table { width: 100%; border-collapse: collapse; table-layout: fixed; margin-top: 15px; font-family: sans-serif; }
         .cal-th { background-color: #f0f2f6; text-align: center; padding: 8px; border: 1px solid #dcdcdc; font-weight: bold; color: #31333F; }
         .cal-td { vertical-align: top; height: 115px; border: 1px solid #dcdcdc; padding: 6px; position: relative; background-color: #ffffff; }
-        .cal-day-num { font-weight: bold; margin-bottom: 6px; color: #555555; font-size: 14px; }
+        .cal-td-holiday { background-color: #fffbea; }
+        .cal-td-closed { background-color: #f5f5f5; }
+        .cal-day-num { font-weight: bold; margin-bottom: 4px; color: #555555; font-size: 14px; }
+        .cal-holiday-label { font-size: 10px; color: #b45309; font-style: italic; margin-bottom: 4px; }
+        .cal-closed-label { font-size: 10px; color: #9ca3af; font-style: italic; margin-bottom: 4px; }
         .cal-empty { background-color: #fafafa; }
         .cal-shift-box { font-size: 11px; padding: 3px 6px; margin-bottom: 4px; border-radius: 4px; background-color: #e8f0fe; border-left: 4px solid #1a73e8; color: #185abc; font-weight: 500; }
         .cal-shift-gap { background-color: #fce8e6; border-left: 4px solid #d93025; color: #d93025; }
+        .cal-shift-gap-past { background-color: #f3f4f6; border-left: 4px solid #9ca3af; color: #9ca3af; }
     </style>
     <table class="cal-table">
         <tr>
@@ -471,15 +515,32 @@ def render_html_calendar_grid(year, month, data_frame):
                 html += '<td class="cal-td cal-empty"></td>'
             else:
                 date_str = f"{year}-{month:02d}-{day:02d}"
-                html += '<td class="cal-td">'
+                h_info = holiday_lookup.get(date_str)
+                is_closed = h_info and h_info["override"] == "closed"
+
+                if h_info:
+                    td_class = "cal-td cal-td-closed" if is_closed else "cal-td cal-td-holiday"
+                else:
+                    td_class = "cal-td"
+                html += f'<td class="{td_class}">'
                 html += f'<div class="cal-day-num">{day}</div>'
-                
+
+                if h_info:
+                    if is_closed:
+                        html += f'<div class="cal-closed-label">🚫 {h_info["name"]}</div>'
+                    else:
+                        html += f'<div class="cal-holiday-label">🏖 {h_info["name"]}</div>'
+
                 if date_str in shifts_by_date:
+                    today_str = datetime.today().strftime('%Y-%m-%d')
                     for shift in shifts_by_date[date_str]:
                         emp = shift['Assigned Employee']
                         t_start = shift['Start Time']
                         if emp == "" or emp == "GAP":
-                            html += f'<div class="cal-shift-box cal-shift-gap">🚨 {t_start}: GAP</div>'
+                            if date_str >= today_str:
+                                html += f'<div class="cal-shift-box cal-shift-gap">🚨 {t_start}: GAP</div>'
+                            else:
+                                html += f'<div class="cal-shift-box cal-shift-gap-past">⬜ {t_start}: GAP</div>'
                         else:
                             html += f'<div class="cal-shift-box">🕒 {t_start}: {emp}</div>'
                 html += '</td>'
@@ -507,7 +568,10 @@ def is_gap_mask(data_frame):
     return data_frame['Assigned Employee'].apply(lambda x: str(x).strip() in ["", "GAP"])
 
 def filter_gaps_only(data_frame):
-    return data_frame[is_gap_mask(data_frame)]
+    """Returns only unfilled shifts on today or future dates — past gaps can't be filled."""
+    today_str = datetime.today().strftime('%Y-%m-%d')
+    future_mask = data_frame['Date'].astype(str).str.strip() >= today_str
+    return data_frame[is_gap_mask(data_frame) & future_mask]
 
 def describe_conflict(name, parsed_rules, row, start_date=""):
     """Explains why a specific shift conflicts with an employee's parsed availability rules.
@@ -604,9 +668,12 @@ def compute_employee_conflicts(data_frame, active_employees, rules_map):
 
 def render_schedule_summary(data_frame):
     """Shows a quick rollup of total/assigned/gap shift counts so success rate is visible without scrolling."""
+    today_str = datetime.today().strftime('%Y-%m-%d')
     total_shifts = len(data_frame)
-    gap_shifts = int(is_gap_mask(data_frame).sum())
-    assigned_shifts = total_shifts - gap_shifts
+    gap_mask = is_gap_mask(data_frame)
+    future_mask = data_frame['Date'].astype(str).str.strip() >= today_str
+    gap_shifts = int((gap_mask & future_mask).sum())  # only upcoming unfilled slots
+    assigned_shifts = total_shifts - int(gap_mask.sum())
 
     col_total, col_assigned, col_gaps = st.columns(3)
     col_total.metric("Total Shifts", total_shifts)
@@ -615,15 +682,15 @@ def render_schedule_summary(data_frame):
     if gap_shifts > 0:
         col_gaps.markdown(f"""
             <div style="line-height: 1.2;">
-                <div style="font-size: 0.875rem; color: rgb(49, 51, 63);">Gaps / Issues</div>
+                <div style="font-size: 0.875rem; color: rgb(49, 51, 63);">Open Gaps</div>
                 <div style="font-size: 2.25rem; font-weight: 600; color: #d93025;">{gap_shifts}</div>
             </div>
         """, unsafe_allow_html=True)
     else:
-        col_gaps.metric("Gaps / Issues", gap_shifts)
+        col_gaps.metric("Open Gaps", gap_shifts)
 
 # 6. Render Views
-# --- Pre-compute tab badge labels (only meaningful when schedule data is loaded) ---
+# --- Pre-compute tab badge labels ---
 audit_tab_label = "👤 Employee Validation Audit"
 history_tab_label = "📜 History"
 employees_df = pd.DataFrame()
@@ -631,9 +698,25 @@ active_employees = pd.DataFrame()
 employee_conflicts = {}
 total_conflict_count = 0
 rules_map = {}
-history_df_preview = pd.DataFrame()
-unseen_direct_edits = 0
-latest_direct_edit_ts = ""
+
+# History is always fetched so the tab is accessible even before a month is initialized,
+# and the direct-edit badge shows regardless of whether the schedule is loaded.
+history_df_preview = cached_fetch_history()
+last_seen_direct_edit_ts = cached_get_app_state("last_seen_direct_edit_timestamp", "")
+unseen_direct_edits, latest_direct_edit_ts = scheduler.count_unseen_direct_edits(history_df_preview, last_seen_direct_edit_ts)
+
+if unseen_direct_edits > 0:
+    history_tab_label += f" 🔔 {unseen_direct_edits}"
+    st.markdown(f"""
+        <div style="background-color: #fff4e5; border: 2px solid #b45309; border-radius: 8px;
+                    padding: 14px 18px; margin-bottom: 12px; display: flex; align-items: center; gap: 12px;">
+            <span style="font-size: 1.8rem;">🔔</span>
+            <span style="font-size: 1.15rem; font-weight: 700; color: #b45309;">
+                {unseen_direct_edits} new direct Google Sheet edit{'s' if unseen_direct_edits != 1 else ''} detected
+            </span>
+            <span style="font-size: 0.95rem; color: #b45309;">— see the History tab for details.</span>
+        </div>
+    """, unsafe_allow_html=True)
 
 if working_df is not None and not working_df.empty:
     # Pre-compute validation conflicts once so the tab label itself can show a rollup count,
@@ -660,29 +743,6 @@ if working_df is not None and not working_df.empty:
                     {total_conflict_count} validation conflict{'s' if total_conflict_count != 1 else ''} found
                 </span>
                 <span style="font-size: 0.95rem; color: #d93025;">— see the Employee Validation Audit tab for details.</span>
-            </div>
-        """, unsafe_allow_html=True)
-
-    # Notify on direct Google Sheet edits specifically — those bypass every safeguard the app
-    # has (availability rules, hour caps, conflict detection) since they happen outside the UI
-    # entirely, so surfacing them is more important than any other history entry. The "seen"
-    # marker is persisted in the sheet itself (not session state) so the badge doesn't reappear
-    # just because the Streamlit process restarted, and tracks the latest seen *timestamp*
-    # (not a raw count) so deleting History rows can't cause a later genuine edit to go unnoticed.
-    history_df_preview = cached_fetch_history()
-    last_seen_direct_edit_ts = cached_get_app_state("last_seen_direct_edit_timestamp", "")
-    unseen_direct_edits, latest_direct_edit_ts = scheduler.count_unseen_direct_edits(history_df_preview, last_seen_direct_edit_ts)
-
-    if unseen_direct_edits > 0:
-        history_tab_label += f" 🔔 {unseen_direct_edits}"
-        st.markdown(f"""
-            <div style="background-color: #fff4e5; border: 2px solid #b45309; border-radius: 8px;
-                        padding: 14px 18px; margin-bottom: 12px; display: flex; align-items: center; gap: 12px;">
-                <span style="font-size: 1.8rem;">🔔</span>
-                <span style="font-size: 1.15rem; font-weight: 700; color: #b45309;">
-                    {unseen_direct_edits} new direct Google Sheet edit{'s' if unseen_direct_edits != 1 else ''} detected
-                </span>
-                <span style="font-size: 0.95rem; color: #b45309;">— see the History tab for details.</span>
             </div>
         """, unsafe_allow_html=True)
 
@@ -714,7 +774,9 @@ with tab1:
 
         def highlight_gaps(row):
             emp_val = str(row['Assigned Employee']).strip() if pd.notna(row['Assigned Employee']) else ""
-            return ['background-color: #ffcccc' if (emp_val == '' or emp_val == 'GAP') else '' for _ in row]
+            is_gap = emp_val == '' or emp_val == 'GAP'
+            is_future = str(row['Date']).strip() >= datetime.today().strftime('%Y-%m-%d')
+            return ['background-color: #ffcccc' if (is_gap and is_future) else '' for _ in row]
 
         table_editor_key = "table_editor_data"
         edited_df = st.data_editor(
@@ -774,7 +836,8 @@ with tab2:
         st.write("Overview of all daily assignments and gaps at a glance.")
         show_gaps_only_calendar = st.toggle("🔍 Show only gaps", key="calendar_gaps_toggle")
         calendar_source_df = filter_gaps_only(working_df) if show_gaps_only_calendar else working_df
-        calendar_html = render_html_calendar_grid(selected_year, selected_month, calendar_source_df)
+        _, _, holidays_df_for_cal = cached_load_tab_data()
+        calendar_html = render_html_calendar_grid(selected_year, selected_month, calendar_source_df, holidays_df_for_cal)
         st.markdown(calendar_html, unsafe_allow_html=True)
 
         st.write("")
@@ -787,7 +850,9 @@ with tab2:
         else:
             max_date = datetime(selected_year, selected_month + 1, 1) - timedelta(days=1)
 
-        edit_date = st.date_input("Choose date to edit:", value=min_date, min_value=min_date, max_value=max_date)
+        today = datetime.today()
+        default_edit_date = today if min_date <= today <= max_date else min_date
+        edit_date = st.date_input("Choose date to edit:", value=default_edit_date, min_value=min_date, max_value=max_date)
         edit_date_str = edit_date.strftime("%Y-%m-%d")
 
         day_shifts = working_df[working_df['Date'] == edit_date_str].copy()
@@ -843,6 +908,26 @@ with tab3:
         st.write("Cross-reference scheduled workloads against default preference constraints and rule parameters.")
         try:
             if not active_employees.empty:
+                # Hours summary table — quick view of every employee's assigned hours vs their
+                # min/max targets, so the distribution is visible without expanding each row.
+                summary_rows = []
+                for _, _emp in active_employees.iterrows():
+                    _name = _emp['Employee Name']
+                    _entry = employee_conflicts.get(_name, {"shifts": pd.DataFrame(), "hours_issue": None, "total_hours": 0.0})
+                    _total = round_to_half(_entry["total_hours"])
+                    _conflict_cnt = int(_entry["shifts"]['Conflict'].sum()) if not _entry["shifts"].empty and 'Conflict' in _entry["shifts"].columns else 0
+                    _has_issue = bool(_entry["hours_issue"]) or _conflict_cnt > 0
+                    summary_rows.append({
+                        "": "🚨" if _has_issue else "✅",
+                        "Employee": _name,
+                        "Shifts": len(_entry["shifts"]),
+                        "Hours": f"{_total:.1f}",
+                        "Min": format_hours_target(_emp['Min Hours']),
+                        "Max": format_hours_target(_emp['Max Hours']),
+                    })
+                st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
+                st.divider()
+
                 if total_conflict_count > 0:
                     st.error(f"🚨 {total_conflict_count} total validation conflict{'s' if total_conflict_count != 1 else ''} found across all employees — likely manual overrides. Expand an employee below for details.")
 
@@ -1499,77 +1584,81 @@ with tab6:
             st.rerun()
 
 with tab7:
-    if working_df is not None and not working_df.empty:
-        st.write("Every change made to the Assignments sheet — through this app or directly in Google Sheets.")
-        try:
-            history_df = history_df_preview
-            if unseen_direct_edits > 0:
-                if st.button(f"🔔 Mark {unseen_direct_edits} direct edit notification(s) as read", type="secondary"):
-                    scheduler.set_app_state("last_seen_direct_edit_timestamp", latest_direct_edit_ts)
-                    cached_fetch_history.clear()
-                    cached_get_app_state.clear()
-                    st.rerun()
-            if history_df.empty:
-                st.info("No history recorded yet. Changes will start appearing here once you run an action that edits the schedule.")
-            else:
-                filter_col1, filter_col2 = st.columns(2)
-                with filter_col1:
-                    method_options = sorted(history_df["Method"].unique())
-                    # Empty selection = no filter applied = show everything. Selecting one or
-                    # more methods narrows the view to just those — a standard "select to
-                    # include" filter, not an allowlist you have to populate to see anything.
-                    selected_methods = st.multiselect("Filter by method", method_options, default=[])
-                with filter_col2:
-                    employee_search = st.text_input("Filter by employee name", placeholder="e.g. Alice")
+    st.write("Every change made through this app or directly in Google Sheets.")
+    try:
+        history_df = history_df_preview
+        if unseen_direct_edits > 0:
+            if st.button(f"🔔 Mark {unseen_direct_edits} direct edit notification(s) as read", type="secondary"):
+                scheduler.set_app_state("last_seen_direct_edit_timestamp", latest_direct_edit_ts)
+                cached_fetch_history.clear()
+                cached_get_app_state.clear()
+                st.rerun()
+        if history_df.empty:
+            st.info("No history recorded yet. Changes will start appearing here once you run an action that edits the schedule.")
+        else:
+            filter_col1, filter_col2, filter_col3 = st.columns(3)
+            with filter_col1:
+                month_options = sorted(history_df["Timestamp"].str[:7].dropna().unique(), reverse=True)
+                selected_hist_months = st.multiselect("Filter by month", month_options, default=[])
+            with filter_col2:
+                method_options = sorted(history_df["Method"].unique())
+                # Empty selection = no filter applied = show everything. Selecting one or
+                # more methods narrows the view to just those — a standard "select to
+                # include" filter, not an allowlist you have to populate to see anything.
+                selected_methods = st.multiselect("Filter by method", method_options, default=[])
+            with filter_col3:
+                employee_search = st.text_input("Filter by employee name", placeholder="e.g. Alice")
 
-                filtered_df = history_df[history_df["Method"].isin(selected_methods)] if selected_methods else history_df
-                if employee_search.strip():
-                    needle = employee_search.strip().lower()
-                    name_match = (
-                        filtered_df["Old Employee"].str.lower().str.contains(needle, na=False)
-                        | filtered_df["New Employee"].str.lower().str.contains(needle, na=False)
-                    )
-                    filtered_df = filtered_df[name_match]
-
-                st.caption(f"Showing {len(filtered_df)} of {len(history_df)} total change(s).")
-
-                # Tint the "what happened" columns (Timestamp, Method) a different shade than
-                # the "what changed" columns, so the two kinds of metadata read as distinct
-                # groups at a glance instead of one undifferentiated row of columns.
-                event_cols = ["Timestamp", "Method"]
-                def shade_event_columns(col):
-                    return ["background-color: #eef2f7" if col.name in event_cols else "" for _ in col]
-
-                st.caption("Select row(s) below to delete them from the history log.")
-                # Key the widget on the filter state so changing a filter swaps in a fresh
-                # widget instance instead of reusing one with a stale selection — Streamlit
-                # tracks dataframe selection by row *position*, so if a filter change reshuffles
-                # what's at each position while a selection is active, the old positions would
-                # silently point at different rows, risking deleting the wrong entry.
-                filter_signature = f"{'|'.join(sorted(selected_methods))}::{employee_search.strip().lower()}"
-                selection_event = st.dataframe(
-                    filtered_df.drop(columns="_sheet_row").style.apply(shade_event_columns, axis=0),
-                    use_container_width=True,
-                    hide_index=True,
-                    on_select="rerun",
-                    selection_mode="multi-row",
-                    key=f"history_table_{hash(filter_signature)}",
-                    # Force literal text rendering — otherwise Streamlit can auto-detect the
-                    # Timestamp column as datetime-like and re-format it with its own display
-                    # logic, silently overriding the 12-hour "...AM/PM" string we stored.
-                    column_config={"Timestamp": st.column_config.TextColumn("Timestamp")}
+            filtered_df = history_df
+            if selected_hist_months:
+                filtered_df = filtered_df[filtered_df["Timestamp"].str[:7].isin(selected_hist_months)]
+            if selected_methods:
+                filtered_df = filtered_df[filtered_df["Method"].isin(selected_methods)]
+            if employee_search.strip():
+                needle = employee_search.strip().lower()
+                name_match = (
+                    filtered_df["Old Employee"].str.lower().str.contains(needle, na=False)
+                    | filtered_df["New Employee"].str.lower().str.contains(needle, na=False)
                 )
+                filtered_df = filtered_df[name_match]
 
-                selected_positions = selection_event.selection.rows
-                if selected_positions:
-                    sheet_rows_to_delete = filtered_df.iloc[selected_positions]["_sheet_row"].tolist()
-                    if st.button(f"🗑️ Delete {len(selected_positions)} selected entr{'y' if len(selected_positions) == 1 else 'ies'}", type="secondary"):
-                        scheduler.delete_history_rows(sheet_rows_to_delete)
-                        st.rerun()
-        except Exception as e:
-            st.error(f"Failed to load change history: {e}")
-    else:
-        st.info("No history recorded yet for this month.")
+            st.caption(f"Showing {len(filtered_df)} of {len(history_df)} total change(s).")
+
+            # Tint the "what happened" columns (Timestamp, Method) a different shade than
+            # the "what changed" columns, so the two kinds of metadata read as distinct
+            # groups at a glance instead of one undifferentiated row of columns.
+            event_cols = ["Timestamp", "Method"]
+            def shade_event_columns(col):
+                return ["background-color: #eef2f7" if col.name in event_cols else "" for _ in col]
+
+            st.caption("Select row(s) below to delete them from the history log.")
+            # Key the widget on the filter state so changing a filter swaps in a fresh
+            # widget instance instead of reusing one with a stale selection — Streamlit
+            # tracks dataframe selection by row *position*, so if a filter change reshuffles
+            # what's at each position while a selection is active, the old positions would
+            # silently point at different rows, risking deleting the wrong entry.
+            filter_signature = f"{'|'.join(sorted(selected_hist_months))}::{'|'.join(sorted(selected_methods))}::{employee_search.strip().lower()}"
+            selection_event = st.dataframe(
+                filtered_df.drop(columns="_sheet_row").style.apply(shade_event_columns, axis=0),
+                use_container_width=True,
+                hide_index=True,
+                on_select="rerun",
+                selection_mode="multi-row",
+                key=f"history_table_{hash(filter_signature)}",
+                # Force literal text rendering — otherwise Streamlit can auto-detect the
+                # Timestamp column as datetime-like and re-format it with its own display
+                # logic, silently overriding the 12-hour "...AM/PM" string we stored.
+                column_config={"Timestamp": st.column_config.TextColumn("Timestamp")}
+            )
+
+            selected_positions = selection_event.selection.rows
+            if selected_positions:
+                sheet_rows_to_delete = filtered_df.iloc[selected_positions]["_sheet_row"].tolist()
+                if st.button(f"🗑️ Delete {len(selected_positions)} selected entr{'y' if len(selected_positions) == 1 else 'ies'}", type="secondary"):
+                    scheduler.delete_history_rows(sheet_rows_to_delete)
+                    st.rerun()
+    except Exception as e:
+        st.error(f"Failed to load change history: {e}")
 
 st.divider()
 st.caption("Running locally. Data syncs directly with the live 'Child Watch Schedule' Google Sheet.")
