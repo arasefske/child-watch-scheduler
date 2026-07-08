@@ -488,7 +488,7 @@ def render_html_calendar_grid(year, month, data_frame, holidays_df=None):
 
     html = """
     <style>
-        .cal-table { width: 100%; border-collapse: collapse; table-layout: fixed; margin-top: 15px; font-family: sans-serif; }
+        .cal-table { width: 100%; border-collapse: collapse; table-layout: fixed; margin-top: 15px; font-family: inherit; }
         .cal-th { background-color: #f0f2f6; text-align: center; padding: 8px; border: 1px solid #dcdcdc; font-weight: bold; color: #31333F; }
         .cal-td { vertical-align: top; height: 115px; border: 1px solid #dcdcdc; padding: 6px; position: relative; background-color: #ffffff; }
         .cal-td-holiday { background-color: #fffbea; }
