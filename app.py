@@ -49,6 +49,13 @@ def cached_get_app_state(key, default=""):
     live read on every rerun."""
     return scheduler.get_app_state(key, default)
 
+@st.cache_data(ttl=120)
+def cached_fetch_all_assignments():
+    """Loads all months from Assignments for the Year-to-Date view (2-minute cache)."""
+    return scheduler.fetch_clean_dataframe("Assignments", fallback_columns=[
+        "Date", "Day of Week", "Day Type", "Start Time", "End Time", "Assigned Employee", "Issues"
+    ])
+
 st.title("🗓️ Child Watch Scheduler Dashboard")
 st.write("Manage your Google Sheet schedule matrix and run the optimization engine locally.")
 st.caption("🟢 Connected to: **Child Watch Schedule**")
@@ -93,6 +100,18 @@ if "employee_snapshot_csv" not in st.session_state:
     st.session_state["employee_snapshot_csv"] = None
 if "confirm_initialize" not in st.session_state:
     st.session_state["confirm_initialize"] = False
+if "_prev_ctrl_year" not in st.session_state:
+    st.session_state["_prev_ctrl_year"] = None
+if "_prev_ctrl_month" not in st.session_state:
+    st.session_state["_prev_ctrl_month"] = None
+if "employee_undo_snapshot" not in st.session_state:
+    st.session_state["employee_undo_snapshot"] = None
+if "holiday_undo_snapshot" not in st.session_state:
+    st.session_state["holiday_undo_snapshot"] = None
+if "template_undo_snapshot" not in st.session_state:
+    st.session_state["template_undo_snapshot"] = None
+if "pending_history_delete" not in st.session_state:
+    st.session_state["pending_history_delete"] = None
 
 fallback_cols = ["Date", "Day of Week", "Day Type", "Start Time", "End Time", "Assigned Employee", "Issues"]
 
@@ -170,16 +189,44 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
+# Load history before the control panel so we have unseen-edit counts ready for the
+# tab badge and the last-generated indicator inside the Step 2 panel.
+history_df_preview = cached_fetch_history()
+last_seen_direct_edit_ts = cached_get_app_state("last_seen_direct_edit_timestamp", "")
+unseen_direct_edits, latest_direct_edit_ts = scheduler.count_unseen_direct_edits(history_df_preview, last_seen_direct_edit_ts)
+history_tab_label = "📜 History"
+if unseen_direct_edits > 0:
+    history_tab_label += f" 🔔 {unseen_direct_edits}"
+
 with st.container(border=True):
     ctrl_year, ctrl_month, ctrl_refresh = st.columns([3, 3, 2])
     with ctrl_year:
-        selected_year = st.number_input("Target Year", min_value=2025, max_value=2035, value=2026)
+        selected_year = st.number_input("Target Year", min_value=2025, max_value=datetime.today().year + 10, value=datetime.today().year)
     with ctrl_month:
-        selected_month_name = st.selectbox("Target Month", month_names, index=6)
+        selected_month_name = st.selectbox("Target Month", month_names, index=datetime.today().month - 1)
         selected_month = month_names.index(selected_month_name) + 1
     with ctrl_refresh:
         st.write("")
         force_refresh_clicked = st.button("🔄 Force Refresh From Cloud", use_container_width=True)
+
+    # Reset the Step 1 confirmation state when the user switches to a different month/year
+    if (st.session_state["_prev_ctrl_year"] != selected_year or
+            st.session_state["_prev_ctrl_month"] != selected_month):
+        st.session_state["confirm_initialize"] = False
+    st.session_state["_prev_ctrl_year"] = selected_year
+    st.session_state["_prev_ctrl_month"] = selected_month
+
+    # Find the most recent generation event for the currently-selected month
+    _gen_methods = {"Auto-Assign (Smart Fill)", "Auto-Assign (Force Overwrite)", "Initialize Blanks"}
+    _target_pfx = f"{selected_year}-{selected_month:02d}"
+    _last_gen_row = None
+    if not history_df_preview.empty and "Method" in history_df_preview.columns and "Date" in history_df_preview.columns:
+        _gen_hist = history_df_preview[
+            history_df_preview["Method"].isin(_gen_methods) &
+            history_df_preview["Date"].astype(str).str.startswith(_target_pfx)
+        ]
+        if not _gen_hist.empty:
+            _last_gen_row = _gen_hist.iloc[0]
 
     st.divider()
 
@@ -240,6 +287,10 @@ with st.container(border=True):
                         st.session_state["last_error"] = str(e)
                         st.error(f"Assignment execution failed: {e}")
             render_inline_undo(["Force Overwrite & Reassign", "Auto-Assign Roster (Smart Fill)"])
+            if _last_gen_row is not None:
+                st.caption(f"Last run: **{_last_gen_row['Method']}** · {_last_gen_row['Timestamp']}")
+            else:
+                st.caption("Not yet generated for this month.")
 
 active_key = f"{selected_year}-{selected_month}"
 
@@ -581,10 +632,8 @@ def is_gap_mask(data_frame):
     return data_frame['Assigned Employee'].apply(lambda x: str(x).strip() in ["", "GAP"])
 
 def filter_gaps_only(data_frame):
-    """Returns only unfilled shifts on today or future dates — past gaps can't be filled."""
-    today_str = datetime.today().strftime('%Y-%m-%d')
-    future_mask = data_frame['Date'].astype(str).str.strip() >= today_str
-    return data_frame[is_gap_mask(data_frame) & future_mask]
+    """Returns all unfilled shifts — past gaps are already rendered grey, future gaps red."""
+    return data_frame[is_gap_mask(data_frame)]
 
 def describe_conflict(name, parsed_rules, row, start_date=""):
     """Explains why a specific shift conflicts with an employee's parsed availability rules.
@@ -704,22 +753,16 @@ def render_schedule_summary(data_frame):
 
 # 6. Render Views
 # --- Pre-compute tab badge labels ---
+# history_tab_label, history_df_preview, unseen_direct_edits, and latest_direct_edit_ts
+# are already computed above the control panel so Step 2 can reference them.
 audit_tab_label = "👤 Employee Validation Audit"
-history_tab_label = "📜 History"
 employees_df = pd.DataFrame()
 active_employees = pd.DataFrame()
 employee_conflicts = {}
 total_conflict_count = 0
 rules_map = {}
 
-# History is always fetched so the tab is accessible even before a month is initialized,
-# and the direct-edit badge shows regardless of whether the schedule is loaded.
-history_df_preview = cached_fetch_history()
-last_seen_direct_edit_ts = cached_get_app_state("last_seen_direct_edit_timestamp", "")
-unseen_direct_edits, latest_direct_edit_ts = scheduler.count_unseen_direct_edits(history_df_preview, last_seen_direct_edit_ts)
-
 if unseen_direct_edits > 0:
-    history_tab_label += f" 🔔 {unseen_direct_edits}"
     st.warning(f"🔔 **{unseen_direct_edits} new direct Google Sheet edit{'s' if unseen_direct_edits != 1 else ''} detected** — see the History tab for details.")
 
 if working_df is not None and not working_df.empty:
@@ -750,17 +793,31 @@ emp_names_for_dropdown = (
     else [""]
 )
 
-tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
     "📊 Table Editor View", "📅 Calendar Grid View",
-    audit_tab_label, "👥 Employee List", "📋 Shift Templates", "🗓️ Holidays", history_tab_label
+    audit_tab_label, "👥 Employee List", "📋 Shift Templates", "🗓️ Holidays", history_tab_label,
+    "📈 Year-to-Date"
 ])
 
 with tab1:
     if working_df is not None and not working_df.empty:
         render_schedule_summary(working_df)
         st.write("Double-click **Assigned Employee** cells below to manually override names.")
-        show_gaps_only_table = st.toggle("🔍 Show only gaps", key="table_gaps_toggle")
+        filter_row_col1, filter_row_col2, filter_row_col3 = st.columns([2, 2, 1])
+        with filter_row_col1:
+            show_gaps_only_table = st.toggle("🔍 Show only gaps", key="table_gaps_toggle")
         table_source_df = filter_gaps_only(working_df) if show_gaps_only_table else working_df
+
+        with filter_row_col2:
+            _emp_names_tab1 = sorted([n for n in employees_df['Employee Name'].tolist() if str(n).strip()]) if not employees_df.empty else []
+            if _emp_names_tab1:
+                _emp_filter_tab1 = st.selectbox("Filter by employee", ["All employees"] + _emp_names_tab1, key="emp_filter_tab1", label_visibility="collapsed")
+                if _emp_filter_tab1 != "All employees":
+                    table_source_df = table_source_df[table_source_df['Assigned Employee'] == _emp_filter_tab1]
+
+        with filter_row_col3:
+            _csv_data = table_source_df.to_csv(index=False).encode("utf-8")
+            st.download_button("⬇️ Export CSV", data=_csv_data, file_name=f"schedule_{selected_year}_{selected_month:02d}.csv", mime="text/csv", use_container_width=True)
 
         # Reserve a slot above the table for the save bar now, and fill it in after the data
         # editor renders below — so the save button is visible without scrolling down to find
@@ -829,8 +886,18 @@ with tab2:
     if working_df is not None and not working_df.empty:
         render_schedule_summary(working_df)
         st.write("Overview of all daily assignments and gaps at a glance.")
-        show_gaps_only_calendar = st.toggle("🔍 Show only gaps", key="calendar_gaps_toggle")
+        cal_filter_col1, cal_filter_col2 = st.columns([2, 2])
+        with cal_filter_col1:
+            show_gaps_only_calendar = st.toggle("🔍 Show only gaps", key="calendar_gaps_toggle")
         calendar_source_df = filter_gaps_only(working_df) if show_gaps_only_calendar else working_df
+
+        with cal_filter_col2:
+            _emp_names_tab2 = sorted([n for n in employees_df['Employee Name'].tolist() if str(n).strip()]) if not employees_df.empty else []
+            if _emp_names_tab2:
+                _emp_filter_tab2 = st.selectbox("Filter by employee", ["All employees"] + _emp_names_tab2, key="emp_filter_tab2", label_visibility="collapsed")
+                if _emp_filter_tab2 != "All employees":
+                    calendar_source_df = calendar_source_df[calendar_source_df['Assigned Employee'] == _emp_filter_tab2]
+
         _, _, holidays_df_for_cal = cached_load_tab_data()
         calendar_html = render_html_calendar_grid(selected_year, selected_month, calendar_source_df, holidays_df_for_cal)
         st.markdown(calendar_html, unsafe_allow_html=True)
@@ -1234,6 +1301,7 @@ with tab4:
                             scheduler.log_employee_changes(fresh_emp_df, clean_save_df)
                         except Exception as _e:
                             print(f"[WARN] Failed to log employee changes to History: {_e}")
+                        st.session_state["employee_undo_snapshot"] = fresh_emp_df[employee_list_cols].to_csv(index=False)
                         scheduler.write_employees_to_sheet(clean_save_df)
                         st.cache_data.clear()
                         st.session_state["employee_data_hash"] = None
@@ -1247,6 +1315,24 @@ with tab4:
         if revert_emp_col.button("↩️ Revert Changes", type="secondary", use_container_width=True, key="revert_employees_btn"):
             del st.session_state[employee_list_key]
             st.rerun()
+
+    if st.session_state.get("employee_undo_snapshot"):
+        st.info("Employee list saved. You can undo this save to restore the previous state.")
+        if st.button("⏪ Undo Last Employee Save", type="secondary", use_container_width=True, key="undo_employee_save"):
+            with st.spinner("Restoring previous employee list..."):
+                try:
+                    import io as _io
+                    snap_df = pd.read_csv(_io.StringIO(st.session_state["employee_undo_snapshot"])).fillna("")
+                    scheduler.write_employees_to_sheet(snap_df)
+                    st.session_state["employee_undo_snapshot"] = None
+                    st.cache_data.clear()
+                    st.session_state["employee_data_hash"] = None
+                    st.session_state["employee_last_synced"] = None
+                    st.session_state["employee_external_change"] = False
+                    st.session_state["employee_snapshot_csv"] = None
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Failed to undo employee save: {e}")
 
     st.divider()
     st.caption("💡 Sheet validation rules are updated automatically on every save. To apply them to an existing sheet without changes, use the button below.")
@@ -1399,6 +1485,7 @@ with tab5:
                             scheduler.log_template_changes(fresh_tmpl_df, clean_tmpl_df)
                         except Exception as _e:
                             print(f"[WARN] Failed to log template changes to History: {_e}")
+                        st.session_state["template_undo_snapshot"] = fresh_tmpl_df[template_cols].to_csv(index=False)
                         scheduler.write_templates_to_sheet(clean_tmpl_df)
                         st.cache_data.clear()
                         st.session_state["template_data_hash"] = None
@@ -1412,6 +1499,24 @@ with tab5:
         if revert_tmpl_col.button("↩️ Revert Changes", type="secondary", use_container_width=True, key="revert_templates_btn"):
             del st.session_state[template_editor_key]
             st.rerun()
+
+    if st.session_state.get("template_undo_snapshot"):
+        st.info("Shift templates saved. You can undo this save to restore the previous state.")
+        if st.button("⏪ Undo Last Template Save", type="secondary", use_container_width=True, key="undo_template_save"):
+            with st.spinner("Restoring previous shift templates..."):
+                try:
+                    import io as _io
+                    snap_df = pd.read_csv(_io.StringIO(st.session_state["template_undo_snapshot"])).fillna("")
+                    scheduler.write_templates_to_sheet(snap_df)
+                    st.session_state["template_undo_snapshot"] = None
+                    st.cache_data.clear()
+                    st.session_state["template_data_hash"] = None
+                    st.session_state["template_last_synced"] = None
+                    st.session_state["template_external_change"] = False
+                    st.session_state["template_snapshot_csv"] = None
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Failed to undo template save: {e}")
 
 with tab6:
     st.write("Add, edit, or remove holidays. Set an **Override Type** to control which shift template is used on that day.")
@@ -1564,6 +1669,7 @@ with tab6:
                             scheduler.log_holiday_changes(fresh_holidays_df, clean_holidays_df)
                         except Exception as _e:
                             print(f"[WARN] Failed to log holiday changes to History: {_e}")
+                        st.session_state["holiday_undo_snapshot"] = fresh_holidays_df[holiday_display_cols].to_csv(index=False)
                         scheduler.write_holidays_to_sheet(clean_holidays_df)
                         st.cache_data.clear()
                         st.session_state["holiday_data_hash"] = None
@@ -1577,6 +1683,24 @@ with tab6:
         if revert_h_col.button("↩️ Revert Changes", type="secondary", use_container_width=True, key="revert_holidays_btn"):
             del st.session_state[holiday_editor_key]
             st.rerun()
+
+    if st.session_state.get("holiday_undo_snapshot"):
+        st.info("Holidays saved. You can undo this save to restore the previous state.")
+        if st.button("⏪ Undo Last Holiday Save", type="secondary", use_container_width=True, key="undo_holiday_save"):
+            with st.spinner("Restoring previous holidays..."):
+                try:
+                    import io as _io
+                    snap_df = pd.read_csv(_io.StringIO(st.session_state["holiday_undo_snapshot"])).fillna("")
+                    scheduler.write_holidays_to_sheet(snap_df)
+                    st.session_state["holiday_undo_snapshot"] = None
+                    st.cache_data.clear()
+                    st.session_state["holiday_data_hash"] = None
+                    st.session_state["holiday_last_synced"] = None
+                    st.session_state["holiday_external_change"] = False
+                    st.session_state["holiday_snapshot_csv"] = None
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Failed to undo holiday save: {e}")
 
 with tab7:
     st.write("Every change made through this app or directly in Google Sheets.")
@@ -1649,11 +1773,55 @@ with tab7:
             selected_positions = selection_event.selection.rows
             if selected_positions:
                 sheet_rows_to_delete = filtered_df.iloc[selected_positions]["_sheet_row"].tolist()
-                if st.button(f"🗑️ Delete {len(selected_positions)} selected entr{'y' if len(selected_positions) == 1 else 'ies'}", type="secondary"):
-                    scheduler.delete_history_rows(sheet_rows_to_delete)
-                    st.rerun()
+                n_sel = len(selected_positions)
+                entry_word = "entry" if n_sel == 1 else "entries"
+                if st.session_state.get("pending_history_delete") == sheet_rows_to_delete:
+                    st.warning(f"⚠️ Permanently delete {n_sel} history {entry_word}? This cannot be undone.")
+                    _confirm_col, _cancel_col = st.columns(2)
+                    if _confirm_col.button("✅ Yes, Delete", type="primary", use_container_width=True, key="confirm_hist_delete"):
+                        scheduler.delete_history_rows(sheet_rows_to_delete)
+                        st.session_state["pending_history_delete"] = None
+                        cached_fetch_history.clear()
+                        st.rerun()
+                    if _cancel_col.button("Cancel", type="secondary", use_container_width=True, key="cancel_hist_delete"):
+                        st.session_state["pending_history_delete"] = None
+                        st.rerun()
+                else:
+                    if st.button(f"🗑️ Delete {n_sel} selected {entry_word}", type="secondary"):
+                        st.session_state["pending_history_delete"] = sheet_rows_to_delete
+                        st.rerun()
     except Exception as e:
         st.error(f"Failed to load change history: {e}")
+
+with tab8:
+    st.write("Cumulative hours scheduled per employee across all recorded months.")
+    try:
+        ytd_raw = cached_fetch_all_assignments()
+        if ytd_raw.empty:
+            st.info("No assignment data found.")
+        else:
+            ytd_filled = ytd_raw[~is_gap_mask(ytd_raw)].copy()
+            if ytd_filled.empty:
+                st.info("No assigned shifts found in the schedule history.")
+            else:
+                ytd_filled['Year-Month'] = ytd_filled['Date'].astype(str).str[:7]
+                ytd_filled['Hours'] = ytd_filled.apply(
+                    lambda r: scheduler.calculate_hours(str(r['Start Time']), str(r['End Time'])), axis=1
+                )
+                pivot = ytd_filled.pivot_table(
+                    index='Assigned Employee', columns='Year-Month', values='Hours',
+                    aggfunc='sum', fill_value=0
+                )
+                pivot.columns.name = None
+                pivot['Total'] = pivot.sum(axis=1)
+                pivot = pivot.sort_values('Total', ascending=False)
+                formatted = pivot.map(lambda x: f"{x:.1f}" if x > 0 else "—")
+                st.dataframe(formatted, use_container_width=True)
+                # CSV export for YTD
+                _ytd_csv = pivot.to_csv().encode("utf-8")
+                st.download_button("⬇️ Export YTD to CSV", data=_ytd_csv, file_name="ytd_hours.csv", mime="text/csv")
+    except Exception as e:
+        st.error(f"Failed to load year-to-date data: {e}")
 
 st.divider()
 st.caption("Running locally. Data syncs directly with the live 'Child Watch Schedule' Google Sheet.")
