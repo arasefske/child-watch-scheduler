@@ -889,12 +889,45 @@ def setup_sheet_validation(employees_df):
     ]
     workbook.batch_update({"requests": requests})
 
-def run_initialize_blanks(target_year, target_month):
+def run_initialize_blanks(target_year, target_month, preserve_before_date=None):
     print(f"Initializing blank matrix for {target_year}-{target_month:02d}...")
     _, templates_df, holidays_df = load_tab_data()
     slots = build_empty_schedule_matrix(target_year, target_month, templates_df, holidays_df)
     if not slots: return
-    final_target_rows = [[s['Date'], s['Day of Week'], s['Day Type'], s['Start Time'], s['End Time'], "", "GAP"] for s in slots]
+
+    if preserve_before_date:
+        # Mid-month initialization: keep existing assignments for dates that have already
+        # passed so we don't wipe the historical record of who actually worked those days.
+        preserved_rows = []
+        try:
+            assignments_sheet = workbook.worksheet("Assignments")
+            existing_records = assignments_sheet.get_all_records()
+            if existing_records:
+                existing_df = pd.DataFrame(existing_records)
+                existing_df.columns = existing_df.columns.str.strip()
+                canonical = ["Date", "Day of Week", "Day Type", "Start Time", "End Time", "Assigned Employee", "Issues"]
+                for col in canonical:
+                    if col not in existing_df.columns:
+                        existing_df[col] = ""
+                existing_df = existing_df[canonical]
+                target_prefix = f"{target_year}-{target_month:02d}"
+                past_mask = (
+                    existing_df['Date'].astype(str).str.startswith(target_prefix) &
+                    (existing_df['Date'].astype(str) < preserve_before_date)
+                )
+                preserved_rows = existing_df[past_mask].values.tolist()
+        except Exception as e:
+            print(f"[WARN] Could not load existing assignments for preservation — past rows may be reset: {e}")
+
+        future_rows = [
+            [s['Date'], s['Day of Week'], s['Day Type'], s['Start Time'], s['End Time'], "", "GAP"]
+            for s in slots if s['Date'] >= preserve_before_date
+        ]
+        final_target_rows = preserved_rows + future_rows
+        print(f"  Preserved {len(preserved_rows)} past row(s), generated {len(future_rows)} blank slot(s) from {preserve_before_date} onward.")
+    else:
+        final_target_rows = [[s['Date'], s['Day of Week'], s['Day Type'], s['Start Time'], s['End Time'], "", "GAP"] for s in slots]
+
     write_to_spreadsheet(target_year, target_month, final_target_rows, method="Initialize Blanks")
 
 def run_auto_assignment(target_year, target_month, overwrite=False):

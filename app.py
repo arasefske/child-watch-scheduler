@@ -235,30 +235,54 @@ with st.container(border=True):
     with col1:
         with st.container(border=True):
             st.markdown("#### 🧱 Step 1 — Initialization")
-            if not st.session_state["confirm_initialize"]:
+            _init_today = datetime.today()
+            _is_past_month = (selected_year, selected_month) < (_init_today.year, _init_today.month)
+            _is_current_month = (selected_year, selected_month) == (_init_today.year, _init_today.month)
+            _preserve_date = _init_today.strftime('%Y-%m-%d') if _is_current_month else None
+
+            if _is_past_month:
                 st.caption("Generate empty template shifts for the month. This clears out previous iterations for this month.")
-                if st.button("Initialize Month", type="secondary", use_container_width=True):
-                    st.session_state["confirm_initialize"] = True
-                    st.rerun()
+                st.button("Initialize Month", type="secondary", use_container_width=True, disabled=True)
+                st.caption("⛔ Past months cannot be re-initialized — doing so would permanently wipe assignment history.")
             else:
-                st.warning(f"⚠️ This will **clear all existing shifts** for {selected_month_name} {selected_year}. This cannot be undone automatically. Continue?")
-                confirm_init_col, cancel_init_col = st.columns(2)
-                if confirm_init_col.button("✅ Yes, Initialize", type="primary", use_container_width=True):
-                    st.session_state["confirm_initialize"] = False
-                    capture_undo_snapshot("Initialize Month")
-                    with st.spinner("Connecting to Google Sheets and building matrix..."):
-                        try:
-                            scheduler.run_initialize_blanks(selected_year, selected_month)
-                            st.success(f"Successfully initialized blank slots for {selected_month_name} {selected_year}!")
-                            st.session_state["schedule_df"] = None
-                            st.session_state["last_error"] = None
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"Initialization failed: {e}")
-                if cancel_init_col.button("Cancel", type="secondary", use_container_width=True):
-                    st.session_state["confirm_initialize"] = False
-                    st.rerun()
-            render_inline_undo("Initialize Month")
+                if _is_current_month:
+                    st.caption(
+                        f"Generate empty template shifts from today onward. "
+                        f"Assignments before {selected_month_name} {_init_today.day} will be preserved."
+                    )
+                else:
+                    st.caption("Generate empty template shifts for the month. This clears out previous iterations for this month.")
+
+                if not st.session_state["confirm_initialize"]:
+                    if st.button("Initialize Month", type="secondary", use_container_width=True):
+                        st.session_state["confirm_initialize"] = True
+                        st.rerun()
+                else:
+                    if _is_current_month:
+                        st.warning(
+                            f"⚠️ This will reset all unassigned slots from today onward for "
+                            f"{selected_month_name} {selected_year}. "
+                            f"Existing assignments before today will be preserved. Continue?"
+                        )
+                    else:
+                        st.warning(f"⚠️ This will **clear all existing shifts** for {selected_month_name} {selected_year}. This cannot be undone automatically. Continue?")
+                    confirm_init_col, cancel_init_col = st.columns(2)
+                    if confirm_init_col.button("✅ Yes, Initialize", type="primary", use_container_width=True):
+                        st.session_state["confirm_initialize"] = False
+                        capture_undo_snapshot("Initialize Month")
+                        with st.spinner("Connecting to Google Sheets and building matrix..."):
+                            try:
+                                scheduler.run_initialize_blanks(selected_year, selected_month, preserve_before_date=_preserve_date)
+                                st.success(f"Successfully initialized blank slots for {selected_month_name} {selected_year}!")
+                                st.session_state["schedule_df"] = None
+                                st.session_state["last_error"] = None
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Initialization failed: {e}")
+                    if cancel_init_col.button("Cancel", type="secondary", use_container_width=True):
+                        st.session_state["confirm_initialize"] = False
+                        st.rerun()
+                render_inline_undo("Initialize Month")
 
     with col2:
         with st.container(border=True):
