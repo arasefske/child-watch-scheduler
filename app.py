@@ -500,6 +500,19 @@ def render_html_calendar_grid(year, month, data_frame, holidays_df=None):
         .cal-shift-box { font-size: 11px; padding: 3px 6px; margin-bottom: 4px; border-radius: 4px; background-color: #e8f0fe; border-left: 4px solid #1a73e8; color: #185abc; font-weight: 500; }
         .cal-shift-gap { background-color: #fce8e6; border-left: 4px solid #d93025; color: #d93025; }
         .cal-shift-gap-past { background-color: #f3f4f6; border-left: 4px solid #9ca3af; color: #9ca3af; }
+        @media (prefers-color-scheme: dark) {
+            .cal-th { background-color: #262730 !important; border-color: rgba(255,255,255,0.12) !important; color: #fafafa !important; }
+            .cal-td { background-color: #0e1117 !important; border-color: rgba(255,255,255,0.12) !important; }
+            .cal-td-holiday { background-color: #2a2200 !important; }
+            .cal-td-closed { background-color: #1a1a1a !important; }
+            .cal-day-num { color: #a0a0a0 !important; }
+            .cal-empty { background-color: #080b0f !important; border-color: rgba(255,255,255,0.06) !important; }
+            .cal-shift-box { background-color: #1a2e4a !important; border-color: #4d8fcc !important; color: #7cb9f5 !important; }
+            .cal-shift-gap { background-color: #3d1515 !important; border-color: #cc4444 !important; color: #ff7070 !important; }
+            .cal-shift-gap-past { background-color: #1f1f1f !important; border-color: #555 !important; color: #666 !important; }
+            .cal-holiday-label { color: #d4a017 !important; }
+            .cal-closed-label { color: #555 !important; }
+        }
     </style>
     <table class="cal-table">
         <tr>
@@ -682,7 +695,7 @@ def render_schedule_summary(data_frame):
     if gap_shifts > 0:
         col_gaps.markdown(f"""
             <div style="line-height: 1.2;">
-                <div style="font-size: 0.875rem; color: rgb(49, 51, 63);">Open Gaps</div>
+                <div style="font-size: 0.875rem;">Open Gaps</div>
                 <div style="font-size: 2.25rem; font-weight: 600; color: #d93025;">{gap_shifts}</div>
             </div>
         """, unsafe_allow_html=True)
@@ -707,16 +720,7 @@ unseen_direct_edits, latest_direct_edit_ts = scheduler.count_unseen_direct_edits
 
 if unseen_direct_edits > 0:
     history_tab_label += f" 🔔 {unseen_direct_edits}"
-    st.markdown(f"""
-        <div style="background-color: #fff4e5; border: 2px solid #b45309; border-radius: 8px;
-                    padding: 14px 18px; margin-bottom: 12px; display: flex; align-items: center; gap: 12px;">
-            <span style="font-size: 1.8rem;">🔔</span>
-            <span style="font-size: 1.15rem; font-weight: 700; color: #b45309;">
-                {unseen_direct_edits} new direct Google Sheet edit{'s' if unseen_direct_edits != 1 else ''} detected
-            </span>
-            <span style="font-size: 0.95rem; color: #b45309;">— see the History tab for details.</span>
-        </div>
-    """, unsafe_allow_html=True)
+    st.warning(f"🔔 **{unseen_direct_edits} new direct Google Sheet edit{'s' if unseen_direct_edits != 1 else ''} detected** — see the History tab for details.")
 
 if working_df is not None and not working_df.empty:
     # Pre-compute validation conflicts once so the tab label itself can show a rollup count,
@@ -735,16 +739,7 @@ if working_df is not None and not working_df.empty:
         audit_tab_label += f" 🚨 {total_conflict_count}"
         # Tab labels in Streamlit can't be styled, so surface a prominent banner above the
         # tabs too — visible immediately regardless of which tab happens to be selected.
-        st.markdown(f"""
-            <div style="background-color: #fce8e6; border: 2px solid #d93025; border-radius: 8px;
-                        padding: 14px 18px; margin-bottom: 12px; display: flex; align-items: center; gap: 12px;">
-                <span style="font-size: 1.8rem;">🚨</span>
-                <span style="font-size: 1.15rem; font-weight: 700; color: #d93025;">
-                    {total_conflict_count} validation conflict{'s' if total_conflict_count != 1 else ''} found
-                </span>
-                <span style="font-size: 0.95rem; color: #d93025;">— see the Employee Validation Audit tab for details.</span>
-            </div>
-        """, unsafe_allow_html=True)
+        st.error(f"🚨 **{total_conflict_count} validation conflict{'s' if total_conflict_count != 1 else ''} found** — see the Employee Validation Audit tab for details.")
 
 # All employee names (active + inactive) used to constrain the Assigned Employee
 # dropdowns in the table and day editors. Includes inactive so existing assignments
