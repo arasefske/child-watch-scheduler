@@ -6,6 +6,7 @@ import calendar
 import sys
 import io
 import contextlib
+from concurrent.futures import ThreadPoolExecutor
 
 st.set_page_config(page_title="Child Watch Scheduler", layout="wide")
 
@@ -58,12 +59,18 @@ def cached_fetch_all_assignments():
     ])
 
 # Pre-warm all Google Sheets caches before the first UI element so the page renders
-# all at once. On a cache hit these return instantly; on a cold start they run here
-# (blank screen briefly) rather than mid-page where content would otherwise pop in late.
-cached_fetch_all_assignments()
-cached_load_tab_data()
-history_df_preview = cached_fetch_history()
-last_seen_direct_edit_ts = cached_get_app_state("last_seen_direct_edit_timestamp", "")
+# all at once. The four reads are independent, so run them in parallel to cut cold-start
+# time from ~4–5s (sequential) to ~1–2s.
+with ThreadPoolExecutor(max_workers=4) as _executor:
+    _f_asgn  = _executor.submit(cached_fetch_all_assignments)
+    _f_tabs  = _executor.submit(cached_load_tab_data)
+    _f_hist  = _executor.submit(cached_fetch_history)
+    _f_state = _executor.submit(cached_get_app_state, "last_seen_direct_edit_timestamp", "")
+
+_f_asgn.result()
+_f_tabs.result()
+history_df_preview        = _f_hist.result()
+last_seen_direct_edit_ts  = _f_state.result()
 unseen_direct_edits, latest_direct_edit_ts = scheduler.count_unseen_direct_edits(
     history_df_preview, last_seen_direct_edit_ts
 )
@@ -380,7 +387,7 @@ with st.expander("🆕 Onboard New Hire — Reassign Existing Shifts", expanded=
             with st.spinner(f"Finding shifts that could be reassigned to {new_hire_name}..."):
                 try:
                     onboard_rules_map = cached_normalize_rules(selected_year, selected_month, onboard_active_employees)
-                    candidates = scheduler.find_new_hire_candidate_shifts(selected_year, selected_month, new_hire_name, onboard_rules_map)
+                    candidates = scheduler.find_new_hire_candidate_shifts(selected_year, selected_month, new_hire_name, onboard_rules_map, _assignments_df=cached_fetch_all_assignments())
                     st.session_state["new_hire_candidates"] = {"name": new_hire_name, "shifts": candidates}
                 except Exception as e:
                     st.session_state["new_hire_candidates"] = None
@@ -439,7 +446,7 @@ with st.expander("🆕 Onboard New Hire — Reassign Existing Shifts", expanded=
                                                 refreshed_rules_map = cached_normalize_rules(selected_year, selected_month, onboard_active_employees)
                                                 st.session_state["new_hire_candidates"] = {
                                                     "name": new_hire_name,
-                                                    "shifts": scheduler.find_new_hire_candidate_shifts(selected_year, selected_month, new_hire_name, refreshed_rules_map),
+                                                    "shifts": scheduler.find_new_hire_candidate_shifts(selected_year, selected_month, new_hire_name, refreshed_rules_map, _assignments_df=cached_fetch_all_assignments()),
                                                 }
                                                 st.success(f"Assigned the {shift['date']} {shift['start_time']} shift to {new_hire_name}!")
                                                 st.rerun()
@@ -472,7 +479,7 @@ if submit_chat:
             log_placeholder = st.empty()
             try:
                 with st_capture(log_placeholder):
-                    previews = scheduler.plan_chat_modification(selected_year, selected_month, chat_instruction)
+                    previews = scheduler.plan_chat_modification(selected_year, selected_month, chat_instruction, _assignments_df=cached_fetch_all_assignments())
                 st.session_state["last_error"] = None
                 if previews:
                     status.update(label=f"✅ Proposed {len(previews)} change(s)", state="complete", expanded=False)

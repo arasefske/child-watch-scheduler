@@ -895,6 +895,7 @@ def run_initialize_blanks(target_year, target_month, preserve_before_date=None):
     slots = build_empty_schedule_matrix(target_year, target_month, templates_df, holidays_df)
     if not slots: return
 
+    existing_df_for_write = None
     if preserve_before_date:
         # Mid-month initialization: keep existing assignments for dates that have already
         # passed so we don't wipe the historical record of who actually worked those days.
@@ -910,6 +911,7 @@ def run_initialize_blanks(target_year, target_month, preserve_before_date=None):
                     if col not in existing_df.columns:
                         existing_df[col] = ""
                 existing_df = existing_df[canonical]
+                existing_df_for_write = existing_df  # passed to write_to_spreadsheet to avoid a second read
                 target_prefix = f"{target_year}-{target_month:02d}"
                 past_mask = (
                     existing_df['Date'].astype(str).str.startswith(target_prefix) &
@@ -928,7 +930,7 @@ def run_initialize_blanks(target_year, target_month, preserve_before_date=None):
     else:
         final_target_rows = [[s['Date'], s['Day of Week'], s['Day Type'], s['Start Time'], s['End Time'], "", "GAP"] for s in slots]
 
-    write_to_spreadsheet(target_year, target_month, final_target_rows, method="Initialize Blanks")
+    write_to_spreadsheet(target_year, target_month, final_target_rows, method="Initialize Blanks", _existing_df=existing_df_for_write)
 
 def run_auto_assignment(target_year, target_month, overwrite=False):
     print(f"Running assignment engine for {target_year}-{target_month:02d} (Overwrite={overwrite})...")
@@ -1177,25 +1179,33 @@ CHAT_DELTA_SCHEMA = {
     "additionalProperties": False
 }
 
-def plan_chat_modification(target_year, target_month, instruction):
+def plan_chat_modification(target_year, target_month, instruction, _assignments_df=None):
     """Uses Claude NLP to find specific shift-change deltas WITHOUT writing anything to the sheet.
     Returns a list of resolved change previews for the UI to show the user before they confirm —
     each one flagged with whether it actually matched a real shift, so a mismatch (e.g. Claude
-    guessing a time that doesn't exist) is visible before commit rather than silently skipped."""
+    guessing a time that doesn't exist) is visible before commit rather than silently skipped.
+
+    Pass _assignments_df (already-cleaned DataFrame) to skip the Google Sheets read when the
+    caller holds a fresh cached copy."""
     if not ai_client:
         raise Exception("Claude client is uninitialized. Verify your API key configuration.")
 
-    print("\n[Chat AI] Fetching current schedule matrix from Google Sheets...")
-    assignments_sheet = workbook.worksheet("Assignments")
-    records = assignments_sheet.get_all_records()
-    if not records:
-        raise Exception("No active schedule slots available to modify.")
-        
-    df = pd.DataFrame(records)
-    df.columns = df.columns.str.strip()
-    for col in df.select_dtypes(include=['object', 'string']):
-        df[col] = df[col].astype(str).str.strip()
-        
+    if _assignments_df is not None:
+        print("\n[Chat AI] Using pre-fetched schedule matrix...")
+        df = _assignments_df.copy()
+        if df.empty:
+            raise Exception("No active schedule slots available to modify.")
+    else:
+        print("\n[Chat AI] Fetching current schedule matrix from Google Sheets...")
+        assignments_sheet = workbook.worksheet("Assignments")
+        records = assignments_sheet.get_all_records()
+        if not records:
+            raise Exception("No active schedule slots available to modify.")
+        df = pd.DataFrame(records)
+        df.columns = df.columns.str.strip()
+        for col in df.select_dtypes(include=['object', 'string']):
+            df[col] = df[col].astype(str).str.strip()
+
     df['Spreadsheet_Row'] = range(2, len(df) + 2)
     
     target_prefix = f"{target_year}-{target_month:02d}"
@@ -1272,7 +1282,7 @@ def plan_chat_modification(target_year, target_month, instruction):
         })
     return previews
 
-def find_new_hire_candidate_shifts(target_year, target_month, employee_name, rules_map):
+def find_new_hire_candidate_shifts(target_year, target_month, employee_name, rules_map, _assignments_df=None):
     """For an employee (typically a new hire who started after this month's schedule was
     already built), finds shifts currently assigned to OTHER active employees that could
     reasonably be handed to them instead — without creating a new violation in the process.
@@ -1284,7 +1294,10 @@ def find_new_hire_candidate_shifts(target_year, target_month, employee_name, rul
     AM/PM-conflict rules, the same way run_auto_assignment() validates any other assignment.
 
     Returns a list of candidates sorted by date, for the UI to let the user pick which ones to
-    actually reassign one at a time — this never writes anything itself."""
+    actually reassign one at a time — this never writes anything itself.
+
+    Pass _assignments_df (already-cleaned DataFrame) to skip the Google Sheets read when the
+    caller holds a fresh cached copy."""
     employees_df, _, _ = load_tab_data()
     active_employees = employees_df[employees_df['Status'].str.lower() == 'active']
 
@@ -1304,12 +1317,15 @@ def find_new_hire_candidate_shifts(target_year, target_month, employee_name, rul
     except ValueError:
         target_max_hours = 999.0
 
-    assignments_sheet = workbook.worksheet("Assignments")
-    records = assignments_sheet.get_all_records()
-    df = pd.DataFrame(records)
-    df.columns = df.columns.str.strip()
-    for col in df.select_dtypes(include=['object', 'string']):
-        df[col] = df[col].astype(str).str.strip()
+    if _assignments_df is not None:
+        df = _assignments_df.copy()
+    else:
+        assignments_sheet = workbook.worksheet("Assignments")
+        records = assignments_sheet.get_all_records()
+        df = pd.DataFrame(records)
+        df.columns = df.columns.str.strip()
+        for col in df.select_dtypes(include=['object', 'string']):
+            df[col] = df[col].astype(str).str.strip()
 
     target_prefix = f"{target_year}-{target_month:02d}"
     month_df = df[df['Date'].astype(str).str.startswith(target_prefix)]
@@ -1430,31 +1446,43 @@ def apply_chat_deltas(deltas, instruction="", method="Natural Language Command")
         except Exception as e:
             print(f"\n[WARN] The change was applied, but logging it to the History sheet failed: {e}\n")
 
-def write_to_spreadsheet(target_year, target_month, target_rows, method="Unknown", edited_by=APP_EDITED_BY, details=""):
+def write_to_spreadsheet(target_year, target_month, target_rows, method="Unknown", edited_by=APP_EDITED_BY, details="", _existing_df=None):
     """Assembles history, validates data schema, and stages mutations transactionally to avoid data loss.
     Also diffs the target month's old vs new Assigned Employee values and logs every changed slot to the
     History sheet under the given method/edited_by/details, so every write through this function — which
-    is every UI-driven write in the app — leaves an audit trail of exactly what changed."""
+    is every UI-driven write in the app — leaves an audit trail of exactly what changed.
+
+    Pass _existing_df to skip the internal get_all_records() call when the caller already holds the
+    current sheet data (e.g. run_initialize_blanks mid-month path, which reads Assignments itself to
+    find preserved rows and would otherwise cause a redundant second read here)."""
     try:
         assignments_sheet = workbook.worksheet("Assignments")
-        existing_records = assignments_sheet.get_all_records()
         historical_rows = []
         old_target_rows = []
 
         canonical_headers = ["Date", "Day of Week", "Day Type", "Start Time", "End Time", "Assigned Employee", "Issues"]
 
-        if existing_records:
-            existing_df = pd.DataFrame(existing_records)
-            existing_df.columns = existing_df.columns.str.strip()
-            # diff_assignment_rows() below reads these rows by fixed position (row[0], row[3],
-            # row[5], ...), so the columns must be in this exact order regardless of whatever
-            # order they happen to be in the sheet right now (e.g. if someone manually dragged a
-            # column directly in Google Sheets) — otherwise it would silently read the wrong
-            # field into a history entry instead of raising an error.
+        if _existing_df is not None:
+            existing_df = _existing_df.copy()
+            # Enforce canonical column order — see comment below for why this matters.
             existing_df = existing_df[canonical_headers]
             target_mask = existing_df['Date'].astype(str).str.startswith(f"{target_year}-{target_month:02d}")
             historical_rows = existing_df[~target_mask].values.tolist()
             old_target_rows = existing_df[target_mask].values.tolist()
+        else:
+            existing_records = assignments_sheet.get_all_records()
+            if existing_records:
+                existing_df = pd.DataFrame(existing_records)
+                existing_df.columns = existing_df.columns.str.strip()
+                # diff_assignment_rows() below reads these rows by fixed position (row[0], row[3],
+                # row[5], ...), so the columns must be in this exact order regardless of whatever
+                # order they happen to be in the sheet right now (e.g. if someone manually dragged a
+                # column directly in Google Sheets) — otherwise it would silently read the wrong
+                # field into a history entry instead of raising an error.
+                existing_df = existing_df[canonical_headers]
+                target_mask = existing_df['Date'].astype(str).str.startswith(f"{target_year}-{target_month:02d}")
+                historical_rows = existing_df[~target_mask].values.tolist()
+                old_target_rows = existing_df[target_mask].values.tolist()
 
         raw_combined = historical_rows + target_rows
         
