@@ -176,8 +176,8 @@ st.markdown("""
            every descendant of <summary> — the expand/collapse chevron is a sibling rendered
            via an icon-ligature font, and forcing it to monospace breaks the glyph mapping and
            shows the raw ligature name ("arrow...") as literal text instead of the icon. */
-        div[data-testid="stExpander"] summary [data-testid="stMarkdownContainer"],
-        div[data-testid="stExpander"] summary [data-testid="stMarkdownContainer"] * {
+        div[data-testid="stTabs"] div[data-testid="stExpander"] summary [data-testid="stMarkdownContainer"],
+        div[data-testid="stTabs"] div[data-testid="stExpander"] summary [data-testid="stMarkdownContainer"] * {
             font-family: "SF Mono", "Monaco", "Consolas", "Liberation Mono", "Courier New", monospace !important;
         }
         /* Hides the built-in "Press Enter to submit form" hint that appears under a text input
