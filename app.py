@@ -37,7 +37,7 @@ def cached_normalize_rules(year, month, _active_employees):
     tab doesn't re-trigger Claude calls on every rerun."""
     return scheduler.batch_normalize_rules_with_claude(_active_employees, year, month)
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=60)
 def cached_fetch_history():
     """Short-lived cache so the History tab and direct-edit badge don't hit Google Sheets
     on every page rerun (toggle clicks, button presses, etc.)."""
@@ -49,9 +49,10 @@ def cached_get_app_state(key, default=""):
     live read on every rerun."""
     return scheduler.get_app_state(key, default)
 
-@st.cache_data(ttl=120)
+@st.cache_data(ttl=600)
 def cached_fetch_all_assignments():
-    """Loads all months from Assignments for the Year-to-Date view (2-minute cache)."""
+    """Loads all months from Assignments. Explicitly cleared after every write, so a longer
+    TTL is safe and reduces redundant API calls during passive reruns."""
     return scheduler.fetch_clean_dataframe("Assignments", fallback_columns=[
         "Date", "Day of Week", "Day Type", "Start Time", "End Time", "Assigned Employee", "Issues"
     ])
@@ -161,6 +162,7 @@ def render_inline_undo(action_names):
                 st.session_state["schedule_df"] = None
                 st.session_state["history_df"] = None
                 st.session_state["last_action"] = ""
+                cached_fetch_all_assignments.clear()
                 st.rerun()
             except Exception as e:
                 st.error(f"Failed to restore state: {e}")
@@ -281,6 +283,7 @@ with st.container(border=True):
                                 st.success(f"Successfully initialized blank slots for {selected_month_name} {selected_year}!")
                                 st.session_state["schedule_df"] = None
                                 st.session_state["last_error"] = None
+                                cached_fetch_all_assignments.clear()
                                 st.rerun()
                             except Exception as e:
                                 st.error(f"Initialization failed: {e}")
@@ -310,6 +313,7 @@ with st.container(border=True):
                         st.success(f"Roster generation complete for {selected_month_name} {selected_year}!")
                         st.session_state["schedule_df"] = None
                         st.session_state["last_error"] = None
+                        cached_fetch_all_assignments.clear()
                         st.rerun()
                     except Exception as e:
                         status.update(label="🛑 Assignment execution failed", state="error", expanded=True)
@@ -431,6 +435,7 @@ with st.expander("🆕 Onboard New Hire — Reassign Existing Shifts", expanded=
                                                     method="New Hire Shift Assignment",
                                                 )
                                                 st.session_state["schedule_df"] = None
+                                                cached_fetch_all_assignments.clear()
                                                 refreshed_rules_map = cached_normalize_rules(selected_year, selected_month, onboard_active_employees)
                                                 st.session_state["new_hire_candidates"] = {
                                                     "name": new_hire_name,
@@ -513,6 +518,7 @@ if st.session_state["pending_chat_changes"]:
                     st.session_state["pending_chat_changes"] = None
                     st.session_state["schedule_df"] = None
                     st.session_state["last_error"] = None
+                    cached_fetch_all_assignments.clear()
                     st.success("Conversational changes committed and updated in Google Sheets!")
                     st.rerun()
                 except Exception as e:
@@ -901,6 +907,7 @@ with tab1:
                             scheduler.write_to_spreadsheet(selected_year, selected_month, rows_to_write, method="Manual Override (Table Editor)")
                             st.success("Changes permanently saved to Google Sheets!")
                             st.session_state["schedule_df"] = None
+                            cached_fetch_all_assignments.clear()
                             st.rerun()
                         except Exception as e:
                             st.error(f"Failed to commit changes: {e}")
@@ -985,6 +992,7 @@ with tab2:
                             scheduler.write_to_spreadsheet(selected_year, selected_month, rows_to_write, method="Manual Override (Day Editor)")
                             st.success(f"Successfully saved overrides for {edit_date_str}!")
                             st.session_state["schedule_df"] = None
+                            cached_fetch_all_assignments.clear()
                             st.rerun()
                         except Exception as e:
                             st.error(f"Failed to commit day shifts: {e}")
