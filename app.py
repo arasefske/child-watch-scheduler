@@ -56,6 +56,20 @@ def cached_fetch_all_assignments():
         "Date", "Day of Week", "Day Type", "Start Time", "End Time", "Assigned Employee", "Issues"
     ])
 
+# Pre-warm all Google Sheets caches before the first UI element so the page renders
+# all at once. On a cache hit these return instantly; on a cold start they run here
+# (blank screen briefly) rather than mid-page where content would otherwise pop in late.
+cached_fetch_all_assignments()
+cached_load_tab_data()
+history_df_preview = cached_fetch_history()
+last_seen_direct_edit_ts = cached_get_app_state("last_seen_direct_edit_timestamp", "")
+unseen_direct_edits, latest_direct_edit_ts = scheduler.count_unseen_direct_edits(
+    history_df_preview, last_seen_direct_edit_ts
+)
+history_tab_label = "📜 History"
+if unseen_direct_edits > 0:
+    history_tab_label += f" 🔔 {unseen_direct_edits}"
+
 st.title("🗓️ Child Watch Scheduler Dashboard")
 st.write("Manage your Google Sheet schedule matrix and run the optimization engine locally.")
 st.caption("🟢 Connected to: **Child Watch Schedule**")
@@ -188,15 +202,6 @@ st.markdown("""
         }
     </style>
 """, unsafe_allow_html=True)
-
-# Load history before the control panel so we have unseen-edit counts ready for the
-# tab badge and the last-generated indicator inside the Step 2 panel.
-history_df_preview = cached_fetch_history()
-last_seen_direct_edit_ts = cached_get_app_state("last_seen_direct_edit_timestamp", "")
-unseen_direct_edits, latest_direct_edit_ts = scheduler.count_unseen_direct_edits(history_df_preview, last_seen_direct_edit_ts)
-history_tab_label = "📜 History"
-if unseen_direct_edits > 0:
-    history_tab_label += f" 🔔 {unseen_direct_edits}"
 
 with st.container(border=True):
     ctrl_year, ctrl_month, ctrl_refresh = st.columns([3, 3, 2])
@@ -526,7 +531,7 @@ st.divider()
 # 5. Automated Data Sync Engine
 if st.session_state["schedule_df"] is None or st.session_state["current_view_key"] != active_key:
     try:
-        df = scheduler.fetch_clean_dataframe("Assignments", fallback_columns=fallback_cols)
+        df = cached_fetch_all_assignments()
         if not df.empty:
             target_prefix = f"{selected_year}-{selected_month:02d}"
             filtered_df = df[df['Date'].astype(str).str.startswith(target_prefix)].copy()
