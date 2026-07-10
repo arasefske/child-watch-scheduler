@@ -1,10 +1,12 @@
 @echo off
 title Child Watch Scheduler
 
+:: If we were re-launched after a git pull, skip straight to the docker steps.
+if "%1"=="launch" goto :launch
+
 echo Starting Child Watch Scheduler...
 echo.
 
-:: Verify Docker Desktop is running before attempting anything.
 echo Checking Docker status...
 docker info >nul 2>&1
 if errorlevel 1 (
@@ -19,6 +21,14 @@ echo Checking for updates...
 git pull
 echo.
 
+:: Re-launch this script as a new process so the docker commands below
+:: run from the freshly-pulled file. Without this, Windows reads the
+:: batch file line-by-line from disk and can land mid-word if git pull
+:: changes the file length while it is still executing.
+cmd /c "%~f0" launch
+exit /b
+
+:launch
 echo Applying any updates...
 docker-compose down
 docker-compose up --build -d
