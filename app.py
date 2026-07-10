@@ -6,7 +6,11 @@ import calendar
 import sys
 import io
 import contextlib
+import os
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
+import streamlit.components.v1 as components
 
 st.set_page_config(page_title="Child Watch Scheduler", layout="wide")
 
@@ -539,25 +543,36 @@ st.sidebar.divider()
 with st.sidebar:
     render_inline_undo("Conversational Chat Command")
 
+@st.dialog("Shut Down App")
+def _confirm_shutdown():
+    st.warning("This will stop the app. Are you sure?")
+    col_yes, col_no = st.columns(2)
+    with col_yes:
+        if st.button("Yes, shut down", type="primary", use_container_width=True):
+            st.session_state["shutting_down"] = True
+            st.rerun()
+    with col_no:
+        if st.button("Cancel", use_container_width=True):
+            st.rerun()
+
 st.sidebar.divider()
 with st.sidebar:
     st.caption("⚙️ App Controls")
-    if st.session_state.get("confirm_shutdown"):
-        st.warning("Are you sure you want to shut down the app?")
-        col_yes, col_no = st.columns(2)
-        with col_yes:
-            if st.button("Yes, shut down", type="primary", use_container_width=True):
-                st.info("Shutting down... you can close this tab.")
-                import os
-                os._exit(0)
-        with col_no:
-            if st.button("Cancel", use_container_width=True):
-                st.session_state["confirm_shutdown"] = False
-                st.rerun()
+    if st.session_state.get("shutting_down"):
+        st.info("Shutting down...")
+        # Redirect the browser tab to a blank page so the user sees a clean
+        # close rather than Streamlit's "connection lost" error banner.
+        components.html("""
+            <script>
+                setTimeout(function() { window.top.location.href = 'about:blank'; }, 800);
+            </script>
+        """, height=0)
+        if not st.session_state.get("shutdown_thread_started"):
+            st.session_state["shutdown_thread_started"] = True
+            threading.Thread(target=lambda: (time.sleep(1.5), os._exit(0)), daemon=True).start()
     else:
         if st.button("🔴 Shut Down App", use_container_width=True):
-            st.session_state["confirm_shutdown"] = True
-            st.rerun()
+            _confirm_shutdown()
 
 st.divider()
 
