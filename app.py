@@ -75,6 +75,14 @@ _f_asgn.result()
 _f_tabs.result()
 history_df_preview        = _f_hist.result()
 last_seen_direct_edit_ts  = _f_state.result()
+
+# Detect the active theme once per run so dataframe highlight functions can
+# use dark-aware colors instead of hardcoded light-mode values.
+try:
+    _is_dark = st.context.theme.base == "dark"
+except Exception:
+    _is_dark = False
+
 unseen_direct_edits, latest_direct_edit_ts = scheduler.count_unseen_direct_edits(
     history_df_preview, last_seen_direct_edit_ts
 )
@@ -905,7 +913,8 @@ with tab1:
             emp_val = str(row['Assigned Employee']).strip() if pd.notna(row['Assigned Employee']) else ""
             is_gap = emp_val == '' or emp_val == 'GAP'
             is_future = str(row['Date']).strip() >= datetime.today().strftime('%Y-%m-%d')
-            return ['background-color: #ffcccc' if (is_gap and is_future) else '' for _ in row]
+            color = 'background-color: #5c2020' if _is_dark else 'background-color: #ffcccc'
+            return [color if (is_gap and is_future) else '' for _ in row]
 
         table_editor_key = "table_editor_data"
         edited_df = st.data_editor(
@@ -1174,7 +1183,8 @@ with tab3:
 
                             def highlight_conflicts(row):
                                 is_conflict = bool(emp_shifts.loc[row.name, 'Conflict'])
-                                return ['background-color: #fce8e6' if is_conflict else '' for _ in row]
+                                color = 'background-color: #5c1e1e' if _is_dark else 'background-color: #fce8e6'
+                                return [color if is_conflict else '' for _ in row]
 
                             st.dataframe(
                                 emp_shifts[["Date", "Day of Week", "Start Time", "End Time", "Day Type"]].style.apply(highlight_conflicts, axis=1),
@@ -1827,7 +1837,8 @@ with tab7:
             # groups at a glance instead of one undifferentiated row of columns.
             event_cols = ["Timestamp", "Method"]
             def shade_event_columns(col):
-                return ["background-color: #eef2f7" if col.name in event_cols else "" for _ in col]
+                color = "background-color: #1e2a3a" if _is_dark else "background-color: #eef2f7"
+                return [color if col.name in event_cols else "" for _ in col]
 
             st.caption("Select row(s) below to delete them from the history log.")
             # Key the widget on the filter state so changing a filter swaps in a fresh
