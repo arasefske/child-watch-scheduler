@@ -6,4 +6,4 @@ services:
     volumes:
       - ./credentials.json:/app/credentials.json:ro
       - ./.env:/app/.env:ro
-    restart: unless-stopped
+    restart: on-failure

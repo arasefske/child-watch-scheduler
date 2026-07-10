@@ -539,6 +539,26 @@ st.sidebar.divider()
 with st.sidebar:
     render_inline_undo("Conversational Chat Command")
 
+st.sidebar.divider()
+with st.sidebar:
+    st.caption("⚙️ App Controls")
+    if st.session_state.get("confirm_shutdown"):
+        st.warning("Are you sure you want to shut down the app?")
+        col_yes, col_no = st.columns(2)
+        with col_yes:
+            if st.button("Yes, shut down", type="primary", use_container_width=True):
+                st.info("Shutting down... you can close this tab.")
+                import os
+                os._exit(0)
+        with col_no:
+            if st.button("Cancel", use_container_width=True):
+                st.session_state["confirm_shutdown"] = False
+                st.rerun()
+    else:
+        if st.button("🔴 Shut Down App", use_container_width=True):
+            st.session_state["confirm_shutdown"] = True
+            st.rerun()
+
 st.divider()
 
 # 5. Automated Data Sync Engine
