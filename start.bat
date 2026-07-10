@@ -1,9 +1,14 @@
 @echo off
 title Child Watch Scheduler
 
+echo Starting Child Watch Scheduler...
+echo.
+
 :: Verify Docker Desktop is running before attempting anything.
+echo Checking Docker status...
 docker info >nul 2>&1
 if errorlevel 1 (
+    echo.
     echo Docker is not running.
     echo Please open Docker Desktop, wait for it to finish starting, then run this again.
     pause
