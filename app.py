@@ -76,12 +76,6 @@ _f_tabs.result()
 history_df_preview        = _f_hist.result()
 last_seen_direct_edit_ts  = _f_state.result()
 
-# Detect the active theme once per run so dataframe highlight functions can
-# use dark-aware colors instead of hardcoded light-mode values.
-try:
-    _is_dark = st.context.theme.base == "dark"
-except Exception:
-    _is_dark = False
 
 unseen_direct_edits, latest_direct_edit_ts = scheduler.count_unseen_direct_edits(
     history_df_preview, last_seen_direct_edit_ts
@@ -220,6 +214,11 @@ st.markdown("""
            field it overlaps the typed text instead of sitting cleanly below it. */
         div[data-testid="InputInstructions"] {
             display: none;
+        }
+        /* Hide Streamlit's connection-lost status banner so shutting down the app shows
+           the current page frozen cleanly rather than an alarming red error widget. */
+        [data-testid="stStatusWidget"] {
+            display: none !important;
         }
     </style>
 """, unsafe_allow_html=True)
@@ -568,13 +567,18 @@ with st.sidebar:
     st.caption("⚙️ App Controls")
     if st.session_state.get("shutting_down"):
         st.info("Shutting down...")
-        # Redirect the browser tab to a blank page so the user sees a clean
-        # close rather than Streamlit's "connection lost" error banner.
+        # Navigate the browser tab away so the user sees a clean close.
+        # height=1 (not 0) ensures the iframe is actually mounted and the
+        # script executes. The stStatusWidget CSS above hides the connection
+        # banner as a belt-and-suspenders fallback.
         components.html("""
             <script>
-                setTimeout(function() { window.top.location.href = 'about:blank'; }, 800);
+                setTimeout(function() {
+                    try { window.top.close(); } catch(e) {}
+                    try { window.top.location.href = 'about:blank'; } catch(e) {}
+                }, 800);
             </script>
-        """, height=0)
+        """, height=1)
         if not st.session_state.get("shutdown_thread_started"):
             st.session_state["shutdown_thread_started"] = True
             threading.Thread(target=lambda: (time.sleep(1.5), os._exit(0)), daemon=True).start()
@@ -913,8 +917,7 @@ with tab1:
             emp_val = str(row['Assigned Employee']).strip() if pd.notna(row['Assigned Employee']) else ""
             is_gap = emp_val == '' or emp_val == 'GAP'
             is_future = str(row['Date']).strip() >= datetime.today().strftime('%Y-%m-%d')
-            color = 'background-color: #5c2020' if _is_dark else 'background-color: #ffcccc'
-            return [color if (is_gap and is_future) else '' for _ in row]
+            return ['background-color: rgba(220,50,50,0.25)' if (is_gap and is_future) else '' for _ in row]
 
         table_editor_key = "table_editor_data"
         edited_df = st.data_editor(
@@ -1183,8 +1186,7 @@ with tab3:
 
                             def highlight_conflicts(row):
                                 is_conflict = bool(emp_shifts.loc[row.name, 'Conflict'])
-                                color = 'background-color: #5c1e1e' if _is_dark else 'background-color: #fce8e6'
-                                return [color if is_conflict else '' for _ in row]
+                                return ['background-color: rgba(220,50,50,0.2)' if is_conflict else '' for _ in row]
 
                             st.dataframe(
                                 emp_shifts[["Date", "Day of Week", "Start Time", "End Time", "Day Type"]].style.apply(highlight_conflicts, axis=1),
@@ -1837,8 +1839,7 @@ with tab7:
             # groups at a glance instead of one undifferentiated row of columns.
             event_cols = ["Timestamp", "Method"]
             def shade_event_columns(col):
-                color = "background-color: #1e2a3a" if _is_dark else "background-color: #eef2f7"
-                return [color if col.name in event_cols else "" for _ in col]
+                return ["background-color: rgba(100,150,230,0.2)" if col.name in event_cols else "" for _ in col]
 
             st.caption("Select row(s) below to delete them from the history log.")
             # Key the widget on the filter state so changing a filter swaps in a fresh
