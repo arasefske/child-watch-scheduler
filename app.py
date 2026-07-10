@@ -7,6 +7,7 @@ import sys
 import io
 import contextlib
 import os
+import signal
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -586,7 +587,10 @@ with st.sidebar:
         """, height=1)
         if not st.session_state.get("shutdown_thread_started"):
             st.session_state["shutdown_thread_started"] = True
-            threading.Thread(target=lambda: (time.sleep(1.5), os._exit(0)), daemon=True).start()
+            # SIGINT lets Streamlit shut down gracefully — it closes WebSocket
+            # connections with a proper close frame so the browser doesn't show
+            # a "connection error". os._exit() kills instantly and causes the drop.
+            threading.Thread(target=lambda: (time.sleep(1.0), os.kill(os.getpid(), signal.SIGINT)), daemon=True).start()
     else:
         if st.button("🔴 Shut Down App", use_container_width=True):
             _confirm_shutdown()
