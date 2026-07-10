@@ -16,7 +16,8 @@ echo.
 
 echo Applying any updates...
 docker-compose down
-docker-compose up --build -d
+docker-compose build --no-cache
+docker-compose up -d
 
 echo Waiting for app to be ready...
 timeout /t 5 /nobreak >nul
