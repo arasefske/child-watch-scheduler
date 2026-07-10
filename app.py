@@ -215,9 +215,16 @@ st.markdown("""
         div[data-testid="InputInstructions"] {
             display: none;
         }
-        /* Hide Streamlit's connection-lost status banner so shutting down the app shows
-           the current page frozen cleanly rather than an alarming red error widget. */
-        [data-testid="stStatusWidget"] {
+        /* Hide Streamlit's connection-lost indicators. Streamlit uses several
+           different elements across versions — target all known ones so the
+           user never sees an alarming red error when the app shuts down. */
+        [data-testid="stStatusWidget"],
+        [data-testid="stConnectionStatus"],
+        [data-testid="stNotificationBanner"],
+        [class*="StatusWidget"],
+        [class*="ConnectionStatus"],
+        [class*="NotificationBanner"],
+        [class*="stReconnecting"] {
             display: none !important;
         }
     </style>
@@ -566,16 +573,14 @@ st.sidebar.divider()
 with st.sidebar:
     st.caption("⚙️ App Controls")
     if st.session_state.get("shutting_down"):
-        st.info("Shutting down...")
-        # Navigate the browser tab away so the user sees a clean close.
-        # height=1 (not 0) ensures the iframe is actually mounted and the
-        # script executes. The stStatusWidget CSS above hides the connection
-        # banner as a belt-and-suspenders fallback.
+        st.info("Shutting down... you can close this tab.")
+        # window.open with '_top' target navigates the top-level browser window
+        # and works even from a null-origin srcdoc iframe (unlike window.top.location
+        # which is blocked by same-origin policy in that context).
         components.html("""
             <script>
                 setTimeout(function() {
-                    try { window.top.close(); } catch(e) {}
-                    try { window.top.location.href = 'about:blank'; } catch(e) {}
+                    window.open('about:blank', '_top');
                 }, 800);
             </script>
         """, height=1)
